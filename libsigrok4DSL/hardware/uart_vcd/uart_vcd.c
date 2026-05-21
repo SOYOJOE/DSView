@@ -35,6 +35,11 @@
 #undef LOG_PREFIX
 #define LOG_PREFIX "uart_vcd: "
 
+#define UART_VCD_UART_BYTES_PER_SAMPLE  4
+#define UART_VCD_SAMPLES_PER_OUTPUT     64
+#define UART_VCD_UART_BUF_SIZE          (UART_VCD_SAMPLES_PER_OUTPUT * UART_VCD_UART_BYTES_PER_SAMPLE)
+#define UART_VCD_OUTPUT_SIZE            (UART_VCD_NUM_PROBES * 8)
+
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
 static struct sr_dev_driver *di = &uart_vcd_driver_info;
 
@@ -113,11 +118,17 @@ static GSList *hw_scan(GSList *options)
 {
     struct sr_dev_inst *sdi;
     struct uart_vcd_context *ctx;
+    struct drv_context *drvc;
     GSList *devices;
     struct stat st;
 
     (void)options;
     devices = NULL;
+
+    drvc = di->priv;
+    if (drvc->instances) {
+        return devices;
+    }
 
     if (stat(UART_VCD_DEFAULT_SERIAL_PORT, &st) < 0) {
         sr_info("Serial port %s not found, skipping.", UART_VCD_DEFAULT_SERIAL_PORT);
@@ -151,9 +162,13 @@ static GSList *hw_scan(GSList *options)
     ctx->collected_samples = 0;
     ctx->num_probes = UART_VCD_NUM_PROBES;
     ctx->collecting = FALSE;
+    ctx->input_buf = NULL;
+    ctx->input_len = 0;
+    ctx->output_buf = NULL;
 
     sdi->path = g_strdup(UART_VCD_DEFAULT_SERIAL_PORT);
 
+    drvc->instances = g_slist_append(drvc->instances, sdi);
     devices = g_slist_append(devices, sdi);
 
     return devices;
@@ -217,6 +232,9 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
             ctx->serial_fd = -1;
         }
 
+        safe_free(ctx->input_buf);
+        safe_free(ctx->output_buf);
+
         sdi->status = SR_ST_INACTIVE;
         return SR_OK;
     }
@@ -227,6 +245,7 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
 static int dev_destroy(struct sr_dev_inst *sdi)
 {
     struct uart_vcd_context *ctx;
+    struct drv_context *drvc;
 
     assert(sdi);
 
@@ -240,6 +259,11 @@ static int dev_destroy(struct sr_dev_inst *sdi)
 
     safe_free(ctx);
     sdi->priv = NULL;
+
+    drvc = di->priv;
+    if (drvc)
+        drvc->instances = g_slist_remove(drvc->instances, sdi);
+
     sr_dev_inst_free(sdi);
 
     return SR_OK;
@@ -388,6 +412,35 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
     return SR_OK;
 }
 
+static void pack_output_block(struct uart_vcd_context *ctx)
+{
+    const uint8_t *in = ctx->input_buf;
+    uint8_t *out = ctx->output_buf;
+    int ch, s, b;
+
+    memset(out, 0, UART_VCD_OUTPUT_SIZE);
+
+    for (ch = 0; ch < UART_VCD_NUM_PROBES; ch++) {
+        for (b = 0; b < 8; b++) {
+            uint8_t byte_val = 0;
+            for (s = 0; s < 8; s++) {
+                unsigned int sample_idx = b * 8 + s;
+                const uint8_t *sample_ptr = in + sample_idx * UART_VCD_UART_BYTES_PER_SAMPLE;
+
+                uint32_t sample;
+                sample = (uint32_t)sample_ptr[0]
+                       | ((uint32_t)sample_ptr[1] << 8)
+                       | ((uint32_t)sample_ptr[2] << 16)
+                       | ((uint32_t)sample_ptr[3] << 24);
+
+                if (sample & (1u << ch))
+                    byte_val |= (1u << s);
+            }
+            out[ch * 8 + b] = byte_val;
+        }
+    }
+}
+
 static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
 {
     (void)cb_data;
@@ -400,6 +453,29 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     ctx = sdi->priv;
     ctx->collected_samples = 0;
     ctx->collecting = TRUE;
+
+    if (ctx->serial_fd < 0) {
+        ctx->serial_fd = uart_open(ctx->serial_port, ctx->baud_rate);
+        if (ctx->serial_fd < 0) {
+            sr_err("Failed to open serial port %s", ctx->serial_port);
+            ctx->collecting = FALSE;
+            return SR_ERR;
+        }
+    }
+
+    safe_free(ctx->input_buf);
+    safe_free(ctx->output_buf);
+
+    ctx->input_buf = malloc(UART_VCD_BUFSIZE);
+    ctx->output_buf = malloc(UART_VCD_OUTPUT_SIZE);
+    ctx->input_len = 0;
+
+    if (!ctx->input_buf || !ctx->output_buf) {
+        sr_err("Failed to allocate buffers");
+        safe_free(ctx->input_buf);
+        safe_free(ctx->output_buf);
+        return SR_ERR_MALLOC;
+    }
 
     sr_info("Start UART VCD acquisition on %s, baud=%d, samplerate=%llu",
             ctx->serial_port, ctx->baud_rate,
@@ -422,11 +498,6 @@ static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
 
     ctx = sdi->priv;
     ctx->collecting = FALSE;
-
-    if (ctx->serial_fd >= 0) {
-        close(ctx->serial_fd);
-        ctx->serial_fd = -1;
-    }
 
     packet.type = SR_DF_END;
     packet.status = SR_PKT_OK;
@@ -452,7 +523,7 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
     struct uart_vcd_context *ctx;
     struct sr_datafeed_packet packet;
     struct sr_datafeed_logic logic;
-    uint8_t buf[UART_VCD_BUFSIZE];
+    uint8_t read_buf[UART_VCD_BUFSIZE];
     ssize_t n;
 
     (void)fd;
@@ -470,7 +541,7 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
         return TRUE;
     }
 
-    n = read(fd, buf, sizeof(buf));
+    n = read(fd, read_buf, sizeof(read_buf));
     if (n < 0) {
         sr_err("Serial read error: %s", strerror(errno));
         return FALSE;
@@ -479,29 +550,48 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
     if (n == 0) {
         return TRUE;
     }
+    sr_info("Received %zd bytes", n);
+    if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {
+        ctx->input_len = 0;
+    }
 
-    packet.type = SR_DF_LOGIC;
-    packet.status = SR_PKT_OK;
-    packet.payload = &logic;
-    logic.format = LA_CROSS_DATA;
-    logic.index = 0;
-    logic.order = 0;
-    logic.length = (uint64_t)n;
-    logic.unitsize = 1;
-    logic.data_error = 0;
-    logic.error_pattern = 0;
-    logic.data = buf;
+    memcpy(ctx->input_buf + ctx->input_len, read_buf, n);
+    ctx->input_len += (uint64_t)n;
 
-    ctx->collected_samples += (uint64_t)n;
+    while (ctx->input_len >= UART_VCD_UART_BUF_SIZE) {
+        pack_output_block(ctx);
 
-    ds_data_forward(sdi, &packet);
-
-    if (ctx->collected_samples >= ctx->total_samples) {
-        packet.type = SR_DF_END;
+        packet.type = SR_DF_LOGIC;
         packet.status = SR_PKT_OK;
+        packet.payload = &logic;
+        logic.format = LA_CROSS_DATA;
+        logic.index = 0;
+        logic.order = 0;
+        logic.length = UART_VCD_OUTPUT_SIZE;
+        logic.unitsize = 1;
+        logic.data_error = 0;
+        logic.error_pattern = 0;
+        logic.data = ctx->output_buf;
+
+        ctx->collected_samples += UART_VCD_SAMPLES_PER_OUTPUT;
+
         ds_data_forward(sdi, &packet);
-        ctx->collecting = FALSE;
-        return FALSE;
+
+        if (ctx->input_len > UART_VCD_UART_BUF_SIZE) {
+            uint64_t remaining = ctx->input_len - UART_VCD_UART_BUF_SIZE;
+            memmove(ctx->input_buf, ctx->input_buf + UART_VCD_UART_BUF_SIZE, remaining);
+            ctx->input_len = remaining;
+        } else {
+            ctx->input_len = 0;
+        }
+
+        if (ctx->collected_samples >= ctx->total_samples) {
+            packet.type = SR_DF_END;
+            packet.status = SR_PKT_OK;
+            ds_data_forward(sdi, &packet);
+            ctx->collecting = FALSE;
+            return FALSE;
+        }
     }
 
     return TRUE;

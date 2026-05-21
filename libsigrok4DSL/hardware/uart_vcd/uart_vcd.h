@@ -26,10 +26,13 @@
 
 #define UART_VCD_DEFAULT_SERIAL_PORT "/dev/ttyUSB0"
 #define UART_VCD_DEFAULT_BAUD_RATE   115200
-#define UART_VCD_NUM_PROBES          8
+#define UART_VCD_NUM_PROBES          32
 #define UART_VCD_DEFAULT_SAMPLERATE  SR_KHZ(100)
 #define UART_VCD_DEFAULT_TOTAL_SAMPLES SR_Kn(100)
 #define UART_VCD_BUFSIZE             (1024 * 64)
+#define UART_VCD_INPUT_WORD_BYTES    4
+#define UART_VCD_SAMPLES_PER_CHUNK   (8 * UART_VCD_INPUT_WORD_BYTES)
+#define UART_VCD_OUTPUT_CHUNK        (UART_VCD_NUM_PROBES * UART_VCD_INPUT_WORD_BYTES)
 
 struct uart_vcd_context {
     int        serial_fd;
@@ -40,6 +43,9 @@ struct uart_vcd_context {
     uint64_t   collected_samples;
     int        num_probes;
     gboolean   collecting;
+    uint8_t   *input_buf;
+    uint64_t   input_len;
+    uint8_t   *output_buf;
 };
 
 static const uint64_t uart_vcd_samplerates[] = {
@@ -58,8 +64,10 @@ static const uint64_t uart_vcd_samplerates[] = {
 };
 
 static const char *uart_vcd_probe_names[] = {
-    "D0", "D1", "D2", "D3",
-    "D4", "D5", "D6", "D7",
+    "D0",  "D1",  "D2",  "D3",  "D4",  "D5",  "D6",  "D7",
+    "D8",  "D9",  "D10", "D11", "D12", "D13", "D14", "D15",
+    "D16", "D17", "D18", "D19", "D20", "D21", "D22", "D23",
+    "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31",
     NULL,
 };
 
