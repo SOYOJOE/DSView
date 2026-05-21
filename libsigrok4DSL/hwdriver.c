@@ -94,6 +94,9 @@ extern SR_PRIV struct sr_dev_driver demo_driver_info;
 extern SR_PRIV struct sr_dev_driver DSLogic_driver_info;
 extern SR_PRIV struct sr_dev_driver DSCope_driver_info;
 #endif
+#ifdef HAVE_UART_VCD
+extern SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
+#endif
 /** @endcond */
 
 static struct sr_dev_driver *drivers_list[] = {
@@ -103,6 +106,9 @@ static struct sr_dev_driver *drivers_list[] = {
 #ifdef HAVE_DSL_DEVICE
     &DSLogic_driver_info,
     &DSCope_driver_info,
+#endif
+#ifdef HAVE_UART_VCD
+    &uart_vcd_driver_info,
 #endif
 	NULL,
 };

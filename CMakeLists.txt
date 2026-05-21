@@ -463,6 +463,7 @@ set(libsigrok4DSL_SOURCES
     libsigrok4DSL/output/output.c
     libsigrok4DSL/input/input.c
     libsigrok4DSL/hardware/demo/demo.c
+    libsigrok4DSL/hardware/uart_vcd/uart_vcd.c
     libsigrok4DSL/input/in_binary.c
     libsigrok4DSL/input/in_vcd.c
     libsigrok4DSL/input/in_wav.c
