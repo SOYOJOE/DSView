@@ -505,17 +505,12 @@ static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
     (void)cb_data;
 
     struct uart_vcd_context *ctx;
-    struct sr_datafeed_packet packet;
 
     assert(sdi);
     assert(sdi->priv);
 
     ctx = sdi->priv;
     ctx->collecting = FALSE;
-
-    packet.type = SR_DF_END;
-    packet.status = SR_PKT_OK;
-    ds_data_forward(sdi, &packet);
 
     return SR_OK;
 }
@@ -548,6 +543,9 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
     ctx = sdi->priv;
 
     if (!ctx->collecting) {
+        packet.type = SR_DF_END;
+        packet.status = SR_PKT_OK;
+        ds_data_forward(sdi, &packet);
         return FALSE;
     }
 
@@ -564,7 +562,6 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
     if (n == 0) {
         return TRUE;
     }
-    sr_info("Received %zd bytes", n);
     if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {
         ctx->input_len = 0;
     }
