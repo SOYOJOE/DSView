@@ -28,7 +28,7 @@
 #define UART_VCD_DEFAULT_BAUD_RATE   115200
 #define UART_VCD_NUM_PROBES          32
 #define UART_VCD_DEFAULT_SAMPLERATE  SR_KHZ(100)
-#define UART_VCD_DEFAULT_TOTAL_SAMPLES SR_Kn(100)
+#define UART_VCD_DEFAULT_TOTAL_SAMPLES SR_Mn(100)
 #define UART_VCD_BUFSIZE             (1024 * 64)
 #define UART_VCD_INPUT_WORD_BYTES    4
 #define UART_VCD_SAMPLES_PER_CHUNK   (8 * UART_VCD_INPUT_WORD_BYTES)
@@ -43,23 +43,13 @@ struct uart_vcd_context {
     uint64_t   collected_samples;
     int        num_probes;
     gboolean   collecting;
+    gboolean   is_loop;
     uint8_t   *input_buf;
     uint64_t   input_len;
     uint8_t   *output_buf;
 };
 
 static const uint64_t uart_vcd_samplerates[] = {
-    SR_HZ(10),
-    SR_HZ(50),
-    SR_HZ(100),
-    SR_HZ(200),
-    SR_HZ(500),
-    SR_KHZ(1),
-    SR_KHZ(5),
-    SR_KHZ(10),
-    SR_KHZ(50),
-    SR_KHZ(100),
-    SR_KHZ(500),
     SR_MHZ(1),
 };
 
@@ -72,6 +62,7 @@ static const char *uart_vcd_probe_names[] = {
 };
 
 static const int32_t uart_vcd_hwoptions[] = {
+    SR_CONF_LOOP_MODE,
 };
 
 static const int32_t uart_vcd_sessions[] = {

@@ -152,7 +152,7 @@ static GSList *hw_scan(GSList *options)
 
     sdi->priv = ctx;
     sdi->driver = di;
-    sdi->dev_type = DEV_TYPE_SERIAL;
+    sdi->dev_type = DEV_TYPE_USB;
 
     ctx->serial_port = g_strdup(UART_VCD_DEFAULT_SERIAL_PORT);
     ctx->baud_rate = UART_VCD_DEFAULT_BAUD_RATE;
@@ -162,6 +162,7 @@ static GSList *hw_scan(GSList *options)
     ctx->collected_samples = 0;
     ctx->num_probes = UART_VCD_NUM_PROBES;
     ctx->collecting = FALSE;
+    ctx->is_loop = FALSE;
     ctx->input_buf = NULL;
     ctx->input_len = 0;
     ctx->output_buf = NULL;
@@ -320,7 +321,16 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
         *data = g_variant_new_boolean(FALSE);
         break;
     case SR_CONF_OPERATION_MODE:
-        *data = g_variant_new_int16(LOGIC);
+        *data = g_variant_new_int16(LO_OP_STREAM);
+        break;
+    case SR_CONF_LOOP_MODE:
+        *data = g_variant_new_boolean(ctx->is_loop);
+        break;
+    case SR_CONF_USB_SPEED:
+        *data = g_variant_new_int32(LIBUSB_SPEED_HIGH);
+        break;
+    case SR_CONF_USB30_SUPPORT:
+        *data = g_variant_new_boolean(FALSE);
         break;
     default:
         return SR_ERR_NA;
@@ -357,6 +367,10 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
         break;
     case SR_CONF_DEVICE_MODE:
         sdi->mode = g_variant_get_int16(data);
+        break;
+    case SR_CONF_LOOP_MODE:
+        ctx->is_loop = g_variant_get_boolean(data);
+        sr_info("Set uart_vcd loop mode:%d", ctx->is_loop);
         break;
     case SR_CONF_TRIGGER_SOURCE:
     case SR_CONF_TRIGGER_SLOPE:
@@ -585,7 +599,7 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
             ctx->input_len = 0;
         }
 
-        if (ctx->collected_samples >= ctx->total_samples) {
+        if (!ctx->is_loop && ctx->collected_samples >= ctx->total_samples) {
             packet.type = SR_DF_END;
             packet.status = SR_PKT_OK;
             ds_data_forward(sdi, &packet);
