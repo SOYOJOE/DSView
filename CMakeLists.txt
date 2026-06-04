@@ -180,17 +180,23 @@ include_directories(${ZLIB_INCLUDE_DIRS})
 find_package(Qt5Core QUIET)
 
 if(Qt5Core_FOUND)
-	message("----- Qt5:")
-	message(STATUS "	 includes:" ${Qt5Core_INCLUDE_DIRS})
-	#find_package(Qt5WinExtras REQUIRED)
-	find_package(Qt5Widgets REQUIRED)
-	find_package(Qt5Gui REQUIRED)
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${Qt5Widgets_EXECUTABLE_COMPILE_FLAGS}")
-	#set(QT_INCLUDE_DIRS ${Qt5Gui_INCLUDE_DIRS} ${Qt5Widgets_INCLUDE_DIRS} ${Qt5WinExtras_INCLUDE_DIRS})
-	#set(QT_LIBRARIES Qt5::Gui Qt5::Widgets Qt5::WinExtras)
-	set(QT_INCLUDE_DIRS ${Qt5Gui_INCLUDE_DIRS} ${Qt5Widgets_INCLUDE_DIRS})
-	set(QT_LIBRARIES Qt5::Gui Qt5::Widgets)
-	add_definitions(${Qt5Gui_DEFINITIONS} ${Qt5Widgets_DEFINITIONS})
+    message("----- Qt5:")
+    message(STATUS "     includes:" ${Qt5Core_INCLUDE_DIRS})
+    
+    # ★ 取消注释下面这一行：
+    find_package(Qt5WinExtras REQUIRED)
+    
+    find_package(Qt5Widgets REQUIRED)
+    find_package(Qt5Gui REQUIRED)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${Qt5Widgets_EXECUTABLE_COMPILE_FLAGS}")
+    
+    # ★ 将下面这一行替换为包含 WinExtras 头文件路径的版本：
+    set(QT_INCLUDE_DIRS ${Qt5Gui_INCLUDE_DIRS} ${Qt5Widgets_INCLUDE_DIRS} ${Qt5WinExtras_INCLUDE_DIRS})
+    
+    # ★ 将下面这一行替换为包含 WinExtras 库的版本（Qt5::WinMain 由 Qt5::WinExtras 自动提供）：
+    set(QT_LIBRARIES Qt5::Gui Qt5::Widgets Qt5::WinExtras)
+    
+    add_definitions(${Qt5Gui_DEFINITIONS} ${Qt5Widgets_DEFINITIONS})
 else()
 	find_package(Qt6Core QUIET)
 endif()
@@ -351,6 +357,8 @@ set(DSView_SOURCES
     DSView/pv/ui/xtoolbutton.cpp
     DSView/pv/ui/uimanager.cpp
     DSView/pv/ui/popupdlglist.cpp
+    DSView/pv/winnativewidget.cpp
+    DSView/pv/winshadow.cpp
 )
 
 set(DSView_HEADERS
@@ -445,6 +453,8 @@ set(DSView_HEADERS
     DSView/pv/deviceagent.h
     DSView/pv/ui/fn.h
     DSView/pv/ui/xtoolbutton.h
+    DSView/pv/winnativewidget.h
+    DSView/pv/winshadow.h
 )
  
 #===============================================================================
