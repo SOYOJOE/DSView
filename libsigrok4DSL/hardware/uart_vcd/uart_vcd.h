@@ -34,6 +34,24 @@
 #define UART_VCD_SAMPLES_PER_CHUNK   (8 * UART_VCD_INPUT_WORD_BYTES)
 #define UART_VCD_OUTPUT_CHUNK        (UART_VCD_NUM_PROBES * UART_VCD_INPUT_WORD_BYTES)
 
+#define UART_VCD_PROTOCOL_RAW        0
+#define UART_VCD_PROTOCOL_EVENT      1
+#define UART_VCD_DEFAULT_PROTOCOL    UART_VCD_PROTOCOL_EVENT
+
+#define UART_VCD_EVENT_TICK_NS       1000
+#define UART_VCD_EVENT_SAMPLERATE_DEFAULT  SR_MHZ(1)
+#define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
+#define UART_VCD_EVENT_DELTA_END     0
+
+enum event_parse_state {
+    EVENT_PARSE_DELTA_TIME,
+    EVENT_PARSE_TOGGLE_MASK,
+    EVENT_PARSE_SYNC_A,
+    EVENT_PARSE_SYNC_B,
+    EVENT_PARSE_SYNC_C,
+    EVENT_PARSE_SYNC_D,
+};
+
 struct uart_vcd_context {
     int        serial_fd;
     char      *serial_port;
@@ -47,6 +65,15 @@ struct uart_vcd_context {
     uint8_t   *input_buf;
     uint64_t   input_len;
     uint8_t   *output_buf;
+    int        protocol;
+    int        event_parse_state;
+    int        event_varint_shift;
+    uint64_t   event_varint_value;
+    uint64_t   event_delta_time;
+    uint32_t   gpio_state;
+    int        event_sample_pos;
+    uint32_t   sync_state_acc;
+    int        sync_byte_idx;
 };
 
 static const uint64_t uart_vcd_samplerates[] = {
@@ -88,6 +115,7 @@ static int config_list(int key, GVariant **data, const struct sr_dev_inst *sdi,
 static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data);
 static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data);
 static int hw_dev_status_get(const struct sr_dev_inst *sdi, struct sr_status *status, gboolean prg);
-static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi);
+static int receive_data_raw(int fd, int revents, const struct sr_dev_inst *sdi);
+static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi);
 
 #endif

@@ -43,6 +43,174 @@
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
 static struct sr_dev_driver *di = &uart_vcd_driver_info;
 
+static int uart_vcd_decode_varint_byte(uint8_t byte, int *shift, uint64_t *value)
+{
+    *value |= ((uint64_t)(byte & 0x7F)) << *shift;
+    *shift += 7;
+    if (byte & 0x80)
+        return 0;
+    return 1;
+}
+
+static void emit_event_sample(struct uart_vcd_context *ctx,
+                               const struct sr_dev_inst *sdi)
+{
+    int byte_idx = ctx->event_sample_pos / 8;
+    int bit_idx  = ctx->event_sample_pos % 8;
+    int ch;
+
+    for (ch = 0; ch < UART_VCD_NUM_PROBES; ch++) {
+        if (ctx->gpio_state & (1u << ch))
+            ctx->output_buf[ch * 8 + byte_idx] |= (1u << bit_idx);
+    }
+
+    ctx->event_sample_pos++;
+
+    if (ctx->event_sample_pos == UART_VCD_SAMPLES_PER_OUTPUT) {
+        struct sr_datafeed_packet packet;
+        struct sr_datafeed_logic logic;
+
+        packet.type    = SR_DF_LOGIC;
+        packet.status  = SR_PKT_OK;
+        packet.payload = &logic;
+        logic.format        = LA_CROSS_DATA;
+        logic.index         = 0;
+        logic.order         = 0;
+        logic.length        = UART_VCD_OUTPUT_SIZE;
+        logic.unitsize      = 1;
+        logic.data_error    = 0;
+        logic.error_pattern = 0;
+        logic.data          = ctx->output_buf;
+
+        ds_data_forward(sdi, &packet);
+
+        memset(ctx->output_buf, 0, UART_VCD_OUTPUT_SIZE);
+        ctx->event_sample_pos = 0;
+    }
+}
+
+static void flush_event_output(struct uart_vcd_context *ctx,
+                                const struct sr_dev_inst *sdi)
+{
+    int remain;
+
+    if (ctx->event_sample_pos == 0)
+        return;
+
+    remain = UART_VCD_SAMPLES_PER_OUTPUT - ctx->event_sample_pos;
+    while (remain-- > 0)
+        emit_event_sample(ctx, sdi);
+}
+
+static void send_event_end(struct uart_vcd_context *ctx,
+                            const struct sr_dev_inst *sdi)
+{
+    struct sr_datafeed_packet packet;
+
+    flush_event_output(ctx, sdi);
+
+    packet.type   = SR_DF_END;
+    packet.status = SR_PKT_OK;
+    ds_data_forward(sdi, &packet);
+    ctx->collecting = FALSE;
+}
+
+static void process_event_byte(struct uart_vcd_context *ctx, uint8_t byte,
+                                const struct sr_dev_inst *sdi)
+{
+    int complete;
+
+    switch (ctx->event_parse_state) {
+    case EVENT_PARSE_SYNC_A:
+        ctx->sync_state_acc = (uint32_t)byte;
+        ctx->event_parse_state = EVENT_PARSE_SYNC_B;
+        return;
+    case EVENT_PARSE_SYNC_B:
+        ctx->sync_state_acc |= (uint32_t)byte << 8;
+        ctx->event_parse_state = EVENT_PARSE_SYNC_C;
+        return;
+    case EVENT_PARSE_SYNC_C:
+        ctx->sync_state_acc |= (uint32_t)byte << 16;
+        ctx->event_parse_state = EVENT_PARSE_SYNC_D;
+        return;
+    case EVENT_PARSE_SYNC_D: {
+        uint32_t new_state = ctx->sync_state_acc | ((uint32_t)byte << 24);
+        uint32_t toggle;
+
+        sr_dbg("event: sync full_state=0x%08x (was 0x%08x)",
+               new_state, ctx->gpio_state);
+
+        toggle = ctx->gpio_state ^ new_state;
+        if (toggle) {
+            uint64_t i;
+            ctx->event_delta_time = 1; /* minimal delta for sync toggle */
+            for (i = 0; i < ctx->event_delta_time && ctx->collecting; i++)
+                emit_event_sample(ctx, sdi);
+            ctx->gpio_state = new_state;
+            ctx->collected_samples += ctx->event_delta_time;
+        } else {
+            ctx->gpio_state = new_state;
+        }
+
+        ctx->event_parse_state = EVENT_PARSE_DELTA_TIME;
+        ctx->event_varint_shift = 0;
+        ctx->event_varint_value = 0;
+        ctx->sync_state_acc = 0;
+
+        if (!ctx->is_loop && ctx->collected_samples >= ctx->total_samples)
+            send_event_end(ctx, sdi);
+        return;
+    }
+    default:
+        break;
+    }
+
+    complete = uart_vcd_decode_varint_byte(byte,
+                                           &ctx->event_varint_shift,
+                                           &ctx->event_varint_value);
+    if (!complete)
+        return;
+
+    if (ctx->event_parse_state == EVENT_PARSE_DELTA_TIME) {
+        ctx->event_delta_time = ctx->event_varint_value;
+        ctx->event_varint_value = 0;
+        ctx->event_varint_shift = 0;
+
+        sr_dbg("event: delta_time=%llu", (unsigned long long)ctx->event_delta_time);
+
+        if (ctx->event_delta_time == UART_VCD_EVENT_DELTA_END) {
+            flush_event_output(ctx, sdi);
+            ctx->event_parse_state = EVENT_PARSE_SYNC_A;
+            ctx->sync_state_acc = 0;
+            ctx->event_varint_shift = 0;
+            ctx->event_varint_value = 0;
+            sr_dbg("event: sync boundary, flushing");
+            return;
+        }
+
+        ctx->event_parse_state = EVENT_PARSE_TOGGLE_MASK;
+    } else {
+        uint32_t toggle_mask = (uint32_t)ctx->event_varint_value;
+        uint64_t i;
+
+        sr_dbg("event: toggle_mask=0x%08x, emitting %llu samples at state=0x%08x",
+               toggle_mask, (unsigned long long)ctx->event_delta_time, ctx->gpio_state);
+
+        for (i = 0; i < ctx->event_delta_time && ctx->collecting; i++)
+            emit_event_sample(ctx, sdi);
+
+        ctx->gpio_state ^= toggle_mask;
+        ctx->collected_samples += ctx->event_delta_time;
+
+        ctx->event_varint_value = 0;
+        ctx->event_varint_shift = 0;
+        ctx->event_parse_state = EVENT_PARSE_DELTA_TIME;
+
+        if (!ctx->is_loop && ctx->collected_samples >= ctx->total_samples)
+            send_event_end(ctx, sdi);
+    }
+}
+
 static int uart_configure(int fd, int baud_rate)
 {
     struct termios tty;
@@ -157,12 +325,26 @@ static GSList *hw_scan(GSList *options)
     ctx->serial_port = g_strdup(UART_VCD_DEFAULT_SERIAL_PORT);
     ctx->baud_rate = UART_VCD_DEFAULT_BAUD_RATE;
     ctx->serial_fd = -1;
-    ctx->samplerate = UART_VCD_DEFAULT_SAMPLERATE;
-    ctx->total_samples = UART_VCD_DEFAULT_TOTAL_SAMPLES;
+    ctx->protocol = UART_VCD_DEFAULT_PROTOCOL;
+    if (ctx->protocol == UART_VCD_PROTOCOL_EVENT) {
+        ctx->samplerate = UART_VCD_EVENT_SAMPLERATE_DEFAULT;
+        ctx->total_samples = UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES;
+    } else {
+        ctx->samplerate = UART_VCD_DEFAULT_SAMPLERATE;
+        ctx->total_samples = UART_VCD_DEFAULT_TOTAL_SAMPLES;
+    }
     ctx->collected_samples = 0;
     ctx->num_probes = UART_VCD_NUM_PROBES;
     ctx->collecting = FALSE;
     ctx->is_loop = FALSE;
+    ctx->event_parse_state = EVENT_PARSE_DELTA_TIME;
+    ctx->event_varint_shift = 0;
+    ctx->event_varint_value = 0;
+    ctx->event_delta_time = 0;
+    ctx->gpio_state = 0;
+    ctx->event_sample_pos = 0;
+    ctx->sync_state_acc = 0;
+    ctx->sync_byte_idx = 0;
     ctx->input_buf = NULL;
     ctx->input_len = 0;
     ctx->output_buf = NULL;
@@ -171,6 +353,11 @@ static GSList *hw_scan(GSList *options)
 
     drvc->instances = g_slist_append(drvc->instances, sdi);
     devices = g_slist_append(devices, sdi);
+
+    sr_info("uart_vcd device created: protocol=%s, samplerate=%llu, total_samples=%llu",
+            ctx->protocol == UART_VCD_PROTOCOL_EVENT ? "event" : "raw",
+            (unsigned long long)ctx->samplerate,
+            (unsigned long long)ctx->total_samples);
 
     return devices;
 }
@@ -468,6 +655,18 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     ctx->collected_samples = 0;
     ctx->collecting = TRUE;
 
+    if (ctx->protocol == UART_VCD_PROTOCOL_EVENT) {
+        ctx->samplerate = UART_VCD_EVENT_SAMPLERATE_DEFAULT;
+        ctx->event_parse_state = EVENT_PARSE_DELTA_TIME;
+        ctx->event_varint_shift = 0;
+        ctx->event_varint_value = 0;
+        ctx->event_delta_time = 0;
+        ctx->gpio_state = 0;
+        ctx->event_sample_pos = 0;
+        ctx->sync_state_acc = 0;
+        ctx->sync_byte_idx = 0;
+    }
+
     if (ctx->serial_fd < 0) {
         ctx->serial_fd = uart_open(ctx->serial_port, ctx->baud_rate);
         if (ctx->serial_fd < 0) {
@@ -476,6 +675,8 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
             return SR_ERR;
         }
     }
+
+    tcflush(ctx->serial_fd, TCIOFLUSH);
 
     safe_free(ctx->input_buf);
     safe_free(ctx->output_buf);
@@ -491,11 +692,18 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
         return SR_ERR_MALLOC;
     }
 
-    sr_info("Start UART VCD acquisition on %s, baud=%d, samplerate=%llu",
+    if (ctx->protocol == UART_VCD_PROTOCOL_EVENT)
+        memset(ctx->output_buf, 0, UART_VCD_OUTPUT_SIZE);
+
+    sr_info("Start UART VCD acquisition on %s, baud=%d, protocol=%s, samplerate=%llu",
             ctx->serial_port, ctx->baud_rate,
+            ctx->protocol == UART_VCD_PROTOCOL_EVENT ? "event" : "raw",
             (unsigned long long)ctx->samplerate);
 
-    sr_session_source_add(ctx->serial_fd, G_IO_IN, 100, receive_data, sdi);
+    if (ctx->protocol == UART_VCD_PROTOCOL_EVENT)
+        sr_session_source_add(ctx->serial_fd, G_IO_IN, 100, receive_data_event, sdi);
+    else
+        sr_session_source_add(ctx->serial_fd, G_IO_IN, 100, receive_data_raw, sdi);
 
     return SR_OK;
 }
@@ -527,7 +735,7 @@ static int hw_dev_status_get(const struct sr_dev_inst *sdi, struct sr_status *st
     return SR_ERR;
 }
 
-static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
+static int receive_data_raw(int fd, int revents, const struct sr_dev_inst *sdi)
 {
     struct uart_vcd_context *ctx;
     struct sr_datafeed_packet packet;
@@ -606,6 +814,45 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
     }
 
     return TRUE;
+}
+
+static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi)
+{
+    struct uart_vcd_context *ctx;
+    struct sr_datafeed_packet packet;
+    uint8_t read_buf[UART_VCD_BUFSIZE];
+    ssize_t n;
+    ssize_t i;
+
+    (void)fd;
+
+    assert(sdi);
+    assert(sdi->priv);
+
+    ctx = sdi->priv;
+
+    if (!ctx->collecting) {
+        packet.type   = SR_DF_END;
+        packet.status = SR_PKT_OK;
+        ds_data_forward(sdi, &packet);
+        return FALSE;
+    }
+
+    if (!(revents & G_IO_IN))
+        return TRUE;
+
+    n = read(fd, read_buf, sizeof(read_buf));
+    if (n < 0) {
+        sr_err("Serial read error: %s", strerror(errno));
+        return FALSE;
+    }
+    if (n == 0)
+        return TRUE;
+
+    for (i = 0; i < n && ctx->collecting; i++)
+        process_event_byte(ctx, read_buf[i], sdi);
+
+    return ctx->collecting ? TRUE : FALSE;
 }
 
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info = {

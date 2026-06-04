@@ -15,7 +15,41 @@
 | `libsigrok4DSL/config.h` | 添加 `#define HAVE_UART_VCD 1` |
 | `CMakeLists.txt` | 将 uart_vcd.c 加入编译源列表 |
 | `DSView/pv/config/appconfig.cpp` | 已清理调试日志 |
-| `uart_vcd_data_path.md` | 数据通路说明文档 |
+| `test_uart_vcd_event_protocol.md` | Event 协议测试数据文档 |
+
+---
+
+## Event + Delta Time 协议 (NEW)
+
+### 概述
+新增替代采集协议 `UART_VCD_PROTOCOL_EVENT`，MCU 仅在 GPIO 变化时发送事件，不用固定周期发送全部 GPIO 状态，大幅降低 UART 带宽占用。
+
+### 数据包格式
+```
+[varint delta_time] [varint toggle_mask] ... [0x00]
+```
+- `delta_time`: 距上一事件的 tick 数 (varint, >0, delta=0 表示流结束)
+- `toggle_mask`: 发生翻转的 GPIO mask (varint, 32bit)
+- Tick 周期: 1us, 采样率自动切换为 1MHz
+
+### Varint 编码 (LE)
+每字节低 7 位为数据，bit7=1 表示还有后续字节。
+
+### 协议切换
+修改 `uart_vcd.h`:
+```c
+#define UART_VCD_DEFAULT_PROTOCOL UART_VCD_PROTOCOL_EVENT
+```
+
+### 新增文件内容
+- `uart_vcd.h`: 添加 `UART_VCD_PROTOCOL_RAW/EVENT` 常量，`event_parse_state` 枚举，context 中 8 个事件解析字段
+- `uart_vcd.c`: 添加 `uart_vcd_decode_varint_byte()`, `emit_event_sample()`, `process_event_byte()`, `receive_data_event()` 四个函数；`receive_data` 重命名为 `receive_data_raw`；`hw_dev_acquisition_start` 根据 protocol 选择回调
+
+### 带宽对比 (测试场景1: 600us, 7事件)
+| 模式 | 数据量 | 说明 |
+|------|--------|------|
+| RAW @1MHz | 2400 bytes | 600×4 bytes/sample |
+| EVENT | **17 bytes** | ~141x 压缩 |
 
 ---
 
@@ -70,12 +104,17 @@
 | 参数 | 默认值 | 可修改 |
 |------|--------|--------|
 | 串口路径 | /dev/ttyUSB0 | 仅代码修改 |
-| 波特率 | 115200 | config_set |
-| 采样率 | 100 kHz | config_set |
-| 采样数上限 | 100K | config_set |
+| 波特率 | 1000000 (1M) | config_set |
+| 采样率 | 100 kHz | config_set (可选列表: 1 MHz) |
+| 采样数上限 | 100M (SR_Mn(100)) | config_set |
 | 通道数 | 32 | 固定 |
-| 模式 | Logic Analyzer | 固定 |
+| 模式 | LOGIC | 固定 |
 | Loop | false | 界面切换 |
+| 输入缓冲区大小 | 65536 bytes (64K) | 仅代码修改 |
+| 每帧采样数 | 64 | 固定 |
+| 每输出帧大小 | 256 bytes (32ch × 8 bytes) | 固定 |
+| 协议模式 | RAW (0) | 代码修改 (UART_VCD_DEFAULT_PROTOCOL) |
+| Event Tick周期 | 1000ns (1us) | 仅代码修改 |
 
 ---
 
