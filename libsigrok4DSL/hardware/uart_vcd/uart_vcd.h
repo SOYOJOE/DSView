@@ -72,6 +72,8 @@ struct uart_vcd_context {
     uint8_t   *input_buf;
     uint64_t   input_len;
     uint8_t   *output_buf;
+    uint8_t   *batch_buf;
+    int        batch_chunk;
     int        protocol;
     int        event_parse_state;
     int        event_varint_shift;
@@ -82,6 +84,12 @@ struct uart_vcd_context {
     uint32_t   sync_state_acc;
     int        sync_byte_idx;
     gboolean   sync_locked;
+
+    /* per-channel UART TX state */
+    uint8_t    uart_tx_data[8];
+    int8_t     uart_tx_bit[8];
+    int8_t     uart_tx_samp_left[8];
+    int8_t     uart_tx_samp_per_bit;
 };
 
 static const uint64_t uart_vcd_samplerates[] = {

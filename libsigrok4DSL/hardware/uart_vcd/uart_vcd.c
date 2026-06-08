@@ -39,6 +39,8 @@
 #define UART_VCD_SAMPLES_PER_OUTPUT     64
 #define UART_VCD_UART_BUF_SIZE          (UART_VCD_SAMPLES_PER_OUTPUT * UART_VCD_UART_BYTES_PER_SAMPLE)
 #define UART_VCD_OUTPUT_SIZE            (UART_VCD_NUM_PROBES * 8)
+#define UART_VCD_BATCH_CHUNKS           16
+#define UART_VCD_BATCH_OUTPUT_SIZE      (UART_VCD_OUTPUT_SIZE * UART_VCD_BATCH_CHUNKS)
 
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
 static struct sr_dev_driver *di = &uart_vcd_driver_info;
@@ -52,40 +54,77 @@ static int uart_vcd_decode_varint_byte(uint8_t byte, int *shift, uint64_t *value
     return 1;
 }
 
+static uint32_t uart_tx_process(struct uart_vcd_context *ctx, uint32_t state)
+{
+    int ch;
+
+    for (ch = 0; ch < 8; ch++) {
+        if (ctx->uart_tx_bit[ch] >= 0) {
+            uint32_t ch_bit = 1u << (24 + ch);
+
+            if (ctx->uart_tx_bit[ch] == 0)
+                state &= ~ch_bit;
+            else if (ctx->uart_tx_bit[ch] >= 9)
+                state |= ch_bit;
+            else if (ctx->uart_tx_data[ch] & (1u << (ctx->uart_tx_bit[ch] - 1)))
+                state |= ch_bit;
+            else
+                state &= ~ch_bit;
+
+            if (--ctx->uart_tx_samp_left[ch] <= 0) {
+                ctx->uart_tx_bit[ch]++;
+                if (ctx->uart_tx_bit[ch] >= 10)
+                    ctx->uart_tx_bit[ch] = -1;
+                else
+                    ctx->uart_tx_samp_left[ch] = ctx->uart_tx_samp_per_bit;
+            }
+        }
+    }
+    return state;
+}
+
 static void emit_event_sample(struct uart_vcd_context *ctx,
                                const struct sr_dev_inst *sdi)
 {
     int byte_idx = ctx->event_sample_pos / 8;
     int bit_idx  = ctx->event_sample_pos % 8;
+    uint32_t state = uart_tx_process(ctx, ctx->gpio_state);
     int ch;
 
     for (ch = 0; ch < UART_VCD_NUM_PROBES; ch++) {
-        if (ctx->gpio_state & (1u << ch))
+        if (state & (1u << ch))
             ctx->output_buf[ch * 8 + byte_idx] |= (1u << bit_idx);
     }
 
     ctx->event_sample_pos++;
 
     if (ctx->event_sample_pos == UART_VCD_SAMPLES_PER_OUTPUT) {
-        struct sr_datafeed_packet packet;
-        struct sr_datafeed_logic logic;
-
-        packet.type    = SR_DF_LOGIC;
-        packet.status  = SR_PKT_OK;
-        packet.payload = &logic;
-        logic.format        = LA_CROSS_DATA;
-        logic.index         = 0;
-        logic.order         = 0;
-        logic.length        = UART_VCD_OUTPUT_SIZE;
-        logic.unitsize      = 1;
-        logic.data_error    = 0;
-        logic.error_pattern = 0;
-        logic.data          = ctx->output_buf;
-
-        ds_data_forward(sdi, &packet);
-
+        memcpy(ctx->batch_buf + ctx->batch_chunk * UART_VCD_OUTPUT_SIZE,
+               ctx->output_buf, UART_VCD_OUTPUT_SIZE);
+        ctx->batch_chunk++;
         memset(ctx->output_buf, 0, UART_VCD_OUTPUT_SIZE);
         ctx->event_sample_pos = 0;
+
+        if (ctx->batch_chunk == UART_VCD_BATCH_CHUNKS) {
+            struct sr_datafeed_packet packet;
+            struct sr_datafeed_logic logic;
+
+            packet.type    = SR_DF_LOGIC;
+            packet.status  = SR_PKT_OK;
+            packet.payload = &logic;
+            logic.format        = LA_CROSS_DATA;
+            logic.index         = 0;
+            logic.order         = 0;
+            logic.length        = UART_VCD_BATCH_OUTPUT_SIZE;
+            logic.unitsize      = 1;
+            logic.data_error    = 0;
+            logic.error_pattern = 0;
+            logic.data          = ctx->batch_buf;
+
+            ds_data_forward(sdi, &packet);
+
+            ctx->batch_chunk = 0;
+        }
     }
 }
 
@@ -106,8 +145,26 @@ static void send_event_end(struct uart_vcd_context *ctx,
                             const struct sr_dev_inst *sdi)
 {
     struct sr_datafeed_packet packet;
+    struct sr_datafeed_logic logic;
 
     flush_event_output(ctx, sdi);
+
+    if (ctx->batch_chunk > 0) {
+        packet.type    = SR_DF_LOGIC;
+        packet.status  = SR_PKT_OK;
+        packet.payload = &logic;
+        logic.format        = LA_CROSS_DATA;
+        logic.index         = 0;
+        logic.order         = 0;
+        logic.length        = (uint64_t)ctx->batch_chunk * UART_VCD_OUTPUT_SIZE;
+        logic.unitsize      = 1;
+        logic.data_error    = 0;
+        logic.error_pattern = 0;
+        logic.data          = ctx->batch_buf;
+
+        ds_data_forward(sdi, &packet);
+        ctx->batch_chunk = 0;
+    }
 
     packet.type   = SR_DF_END;
     packet.status = SR_PKT_OK;
@@ -203,39 +260,21 @@ static void process_event_byte(struct uart_vcd_context *ctx, uint8_t byte,
             int uart_ch  = (int)((toggle_mask >> UART_VCD_UART_CHANNEL_SHIFT)
                                  & UART_VCD_UART_CHANNEL_MASK);
             uint8_t data = (uint8_t)(toggle_mask & UART_VCD_UART_DATA_MASK);
-            uint32_t ch_bit = 1u << (24 + uart_ch);   /* D24 + uart_ch */
-            uint16_t bits;
-            int b, bit_samples;
 
             sr_dbg("event: uart data ch=%d byte=0x%02x('%c') delta=%llu",
                    uart_ch, data, (data >= 32 && data < 127) ? data : '?',
                    (unsigned long long)ctx->event_delta_time);
 
-            /* Emit delta samples at current state (UART idle = high) */
-            ctx->gpio_state |= ch_bit;  /* idle level */
+            ctx->uart_tx_data[uart_ch]     = data;
+            ctx->uart_tx_bit[uart_ch]      = 0;
+            ctx->uart_tx_samp_left[uart_ch] = ctx->uart_tx_samp_per_bit;
+
+            ctx->gpio_state |= (1u << (24 + uart_ch));
+
             for (i = 0; i < ctx->event_delta_time && ctx->collecting; i++)
                 emit_event_sample(ctx, sdi);
 
-            /* Build 10-bit serial frame: start(0) + 8 data LSB-first + stop(1) */
-            bits = ((uint16_t)data << 1) | 0x0200;
-
-            /* Samples per bit: samplerate / baudrate, min 2 */
-            bit_samples = (int)(ctx->samplerate / UART_VCD_UART_BAUD_RATE);
-            if (bit_samples < 2) bit_samples = 2;
-
-            for (b = 0; b < 10 && ctx->collecting; b++) {
-                if (bits & 1)
-                    ctx->gpio_state |= ch_bit;
-                else
-                    ctx->gpio_state &= ~ch_bit;
-                bits >>= 1;
-
-                for (i = 0; i < (uint64_t)bit_samples && ctx->collecting; i++)
-                    emit_event_sample(ctx, sdi);
-            }
-
-            ctx->collected_samples += ctx->event_delta_time
-                                     + (uint64_t)(10 * bit_samples);
+            ctx->collected_samples += ctx->event_delta_time;
         } else {
             sr_dbg("event: toggle_mask=0x%08x, emitting %llu samples at state=0x%08x",
                    toggle_mask, (unsigned long long)ctx->event_delta_time, ctx->gpio_state);
@@ -467,6 +506,7 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
 
         safe_free(ctx->input_buf);
         safe_free(ctx->output_buf);
+        safe_free(ctx->batch_buf);
 
         sdi->status = SR_ST_INACTIVE;
         return SR_OK;
@@ -711,50 +751,48 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
         ctx->sync_state_acc = 0;
         ctx->sync_byte_idx = 0;
         ctx->sync_locked = FALSE;
+        ctx->uart_tx_samp_per_bit = (int)(ctx->samplerate / UART_VCD_UART_BAUD_RATE);
+        if (ctx->uart_tx_samp_per_bit < 2)
+            ctx->uart_tx_samp_per_bit = 2;
+        memset(ctx->uart_tx_data, 0, sizeof(ctx->uart_tx_data));
+        memset(ctx->uart_tx_bit, -1, sizeof(ctx->uart_tx_bit));
+        memset(ctx->uart_tx_samp_left, 0, sizeof(ctx->uart_tx_samp_left));
     }
 
+    if (ctx->serial_fd >= 0) {
+        close(ctx->serial_fd);
+        ctx->serial_fd = -1;
+        usleep(100000);
+    }
+
+    ctx->serial_fd = uart_open(ctx->serial_port, ctx->baud_rate);
     if (ctx->serial_fd < 0) {
-        ctx->serial_fd = uart_open(ctx->serial_port, ctx->baud_rate);
-        if (ctx->serial_fd < 0) {
-            sr_err("Failed to open serial port %s", ctx->serial_port);
-            ctx->collecting = FALSE;
-            return SR_ERR;
-        }
+        sr_err("Failed to open serial port %s", ctx->serial_port);
+        ctx->collecting = FALSE;
+        return SR_ERR;
     }
 
     tcflush(ctx->serial_fd, TCIOFLUSH);
-
-    {
-        struct termios tty;
-        uint8_t drain_buf[1024];
-        ssize_t rd;
-
-        if (tcgetattr(ctx->serial_fd, &tty) == 0) {
-            tty.c_cc[VMIN] = 0;
-            tty.c_cc[VTIME] = 0;
-            tcsetattr(ctx->serial_fd, TCSANOW, &tty);
-
-            while ((rd = read(ctx->serial_fd, drain_buf, sizeof(drain_buf))) > 0)
-                ;
-
-            tty.c_cc[VTIME] = 1;
-            tcsetattr(ctx->serial_fd, TCSANOW, &tty);
-        }
-    }
-
+    tcflush(ctx->serial_fd, TCIOFLUSH);
+    usleep(100000);
     tcflush(ctx->serial_fd, TCIOFLUSH);
 
     safe_free(ctx->input_buf);
     safe_free(ctx->output_buf);
+    safe_free(ctx->batch_buf);
 
     ctx->input_buf = malloc(UART_VCD_BUFSIZE);
     ctx->output_buf = malloc(UART_VCD_OUTPUT_SIZE);
-    ctx->input_len = 0;
+    ctx->batch_buf  = malloc(UART_VCD_BATCH_OUTPUT_SIZE);
+    ctx->input_len  = 0;
+    ctx->batch_chunk = 0;
 
-    if (!ctx->input_buf || !ctx->output_buf) {
+    if (!ctx->input_buf || !ctx->output_buf || !ctx->batch_buf) {
         sr_err("Failed to allocate buffers");
         safe_free(ctx->input_buf);
         safe_free(ctx->output_buf);
+        safe_free(ctx->batch_buf);
+        safe_free(ctx->batch_buf);
         return SR_ERR_MALLOC;
     }
 
@@ -923,8 +961,8 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
     for (i = 0; i < n && ctx->collecting; i++) {
         if (!ctx->sync_locked && ctx->event_parse_state < EVENT_PARSE_SYNC_A) {
             if (read_buf[i] == 0x00) {
-                int sync_end = i + 5;
-                for (; i < sync_end && i < n && ctx->collecting; i++)
+                int end = i + 5;
+                for (; i < end && i < n && ctx->collecting; i++)
                     process_event_byte(ctx, read_buf[i], sdi);
                 i--;
             }
