@@ -43,6 +43,13 @@
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
 #define UART_VCD_EVENT_DELTA_END     0
 
+#define UART_VCD_UART_MARKER_BIT     31
+#define UART_VCD_UART_MARKER         (1u << UART_VCD_UART_MARKER_BIT)
+#define UART_VCD_UART_CHANNEL_SHIFT  8
+#define UART_VCD_UART_CHANNEL_MASK   0x07
+#define UART_VCD_UART_DATA_MASK      0xFF
+#define UART_VCD_UART_BAUD_RATE      500000
+
 enum event_parse_state {
     EVENT_PARSE_DELTA_TIME,
     EVENT_PARSE_TOGGLE_MASK,
@@ -74,6 +81,7 @@ struct uart_vcd_context {
     int        event_sample_pos;
     uint32_t   sync_state_acc;
     int        sync_byte_idx;
+    gboolean   sync_locked;
 };
 
 static const uint64_t uart_vcd_samplerates[] = {
@@ -84,7 +92,7 @@ static const char *uart_vcd_probe_names[] = {
     "D0",  "D1",  "D2",  "D3",  "D4",  "D5",  "D6",  "D7",
     "D8",  "D9",  "D10", "D11", "D12", "D13", "D14", "D15",
     "D16", "D17", "D18", "D19", "D20", "D21", "D22", "D23",
-    "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31",
+    "RX0", "RX1", "RX2", "RX3", "RX4", "RX5", "RX6", "RX7",
     NULL,
 };
 

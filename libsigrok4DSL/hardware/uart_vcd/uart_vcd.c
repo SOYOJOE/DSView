@@ -140,6 +140,8 @@ static void process_event_byte(struct uart_vcd_context *ctx, uint8_t byte,
         sr_dbg("event: sync full_state=0x%08x (was 0x%08x)",
                new_state, ctx->gpio_state);
 
+        ctx->sync_locked = TRUE;
+
         toggle = ctx->gpio_state ^ new_state;
         if (toggle) {
             uint64_t i;
@@ -173,6 +175,10 @@ static void process_event_byte(struct uart_vcd_context *ctx, uint8_t byte,
 
     if (ctx->event_parse_state == EVENT_PARSE_DELTA_TIME) {
         ctx->event_delta_time = ctx->event_varint_value;
+
+        if (ctx->event_delta_time > 100000000ULL)
+            ctx->event_delta_time = 100000000ULL;
+
         ctx->event_varint_value = 0;
         ctx->event_varint_shift = 0;
 
@@ -193,14 +199,53 @@ static void process_event_byte(struct uart_vcd_context *ctx, uint8_t byte,
         uint32_t toggle_mask = (uint32_t)ctx->event_varint_value;
         uint64_t i;
 
-        sr_dbg("event: toggle_mask=0x%08x, emitting %llu samples at state=0x%08x",
-               toggle_mask, (unsigned long long)ctx->event_delta_time, ctx->gpio_state);
+        if (toggle_mask & UART_VCD_UART_MARKER) {
+            int uart_ch  = (int)((toggle_mask >> UART_VCD_UART_CHANNEL_SHIFT)
+                                 & UART_VCD_UART_CHANNEL_MASK);
+            uint8_t data = (uint8_t)(toggle_mask & UART_VCD_UART_DATA_MASK);
+            uint32_t ch_bit = 1u << (24 + uart_ch);   /* D24 + uart_ch */
+            uint16_t bits;
+            int b, bit_samples;
 
-        for (i = 0; i < ctx->event_delta_time && ctx->collecting; i++)
-            emit_event_sample(ctx, sdi);
+            sr_dbg("event: uart data ch=%d byte=0x%02x('%c') delta=%llu",
+                   uart_ch, data, (data >= 32 && data < 127) ? data : '?',
+                   (unsigned long long)ctx->event_delta_time);
 
-        ctx->gpio_state ^= toggle_mask;
-        ctx->collected_samples += ctx->event_delta_time;
+            /* Emit delta samples at current state (UART idle = high) */
+            ctx->gpio_state |= ch_bit;  /* idle level */
+            for (i = 0; i < ctx->event_delta_time && ctx->collecting; i++)
+                emit_event_sample(ctx, sdi);
+
+            /* Build 10-bit serial frame: start(0) + 8 data LSB-first + stop(1) */
+            bits = ((uint16_t)data << 1) | 0x0200;
+
+            /* Samples per bit: samplerate / baudrate, min 2 */
+            bit_samples = (int)(ctx->samplerate / UART_VCD_UART_BAUD_RATE);
+            if (bit_samples < 2) bit_samples = 2;
+
+            for (b = 0; b < 10 && ctx->collecting; b++) {
+                if (bits & 1)
+                    ctx->gpio_state |= ch_bit;
+                else
+                    ctx->gpio_state &= ~ch_bit;
+                bits >>= 1;
+
+                for (i = 0; i < (uint64_t)bit_samples && ctx->collecting; i++)
+                    emit_event_sample(ctx, sdi);
+            }
+
+            ctx->collected_samples += ctx->event_delta_time
+                                     + (uint64_t)(10 * bit_samples);
+        } else {
+            sr_dbg("event: toggle_mask=0x%08x, emitting %llu samples at state=0x%08x",
+                   toggle_mask, (unsigned long long)ctx->event_delta_time, ctx->gpio_state);
+
+            for (i = 0; i < ctx->event_delta_time && ctx->collecting; i++)
+                emit_event_sample(ctx, sdi);
+
+            ctx->gpio_state ^= toggle_mask;
+            ctx->collected_samples += ctx->event_delta_time;
+        }
 
         ctx->event_varint_value = 0;
         ctx->event_varint_shift = 0;
@@ -499,7 +544,7 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
         *data = g_variant_new_boolean(FALSE);
         break;
     case SR_CONF_LOAD_DECODER:
-        *data = g_variant_new_boolean(FALSE);
+        *data = g_variant_new_boolean(TRUE);
         break;
     case SR_CONF_RLE:
         *data = g_variant_new_boolean(FALSE);
@@ -665,6 +710,7 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
         ctx->event_sample_pos = 0;
         ctx->sync_state_acc = 0;
         ctx->sync_byte_idx = 0;
+        ctx->sync_locked = FALSE;
     }
 
     if (ctx->serial_fd < 0) {
@@ -673,6 +719,26 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
             sr_err("Failed to open serial port %s", ctx->serial_port);
             ctx->collecting = FALSE;
             return SR_ERR;
+        }
+    }
+
+    tcflush(ctx->serial_fd, TCIOFLUSH);
+
+    {
+        struct termios tty;
+        uint8_t drain_buf[1024];
+        ssize_t rd;
+
+        if (tcgetattr(ctx->serial_fd, &tty) == 0) {
+            tty.c_cc[VMIN] = 0;
+            tty.c_cc[VTIME] = 0;
+            tcsetattr(ctx->serial_fd, TCSANOW, &tty);
+
+            while ((rd = read(ctx->serial_fd, drain_buf, sizeof(drain_buf))) > 0)
+                ;
+
+            tty.c_cc[VTIME] = 1;
+            tcsetattr(ctx->serial_fd, TCSANOW, &tty);
         }
     }
 
@@ -719,6 +785,11 @@ static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
 
     ctx = sdi->priv;
     ctx->collecting = FALSE;
+
+    if (ctx->serial_fd >= 0) {
+        tcflush(ctx->serial_fd, TCIOFLUSH);
+        tcflush(ctx->serial_fd, TCIOFLUSH);
+    }
 
     return SR_OK;
 }
@@ -849,8 +920,18 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
     if (n == 0)
         return TRUE;
 
-    for (i = 0; i < n && ctx->collecting; i++)
-        process_event_byte(ctx, read_buf[i], sdi);
+    for (i = 0; i < n && ctx->collecting; i++) {
+        if (!ctx->sync_locked && ctx->event_parse_state < EVENT_PARSE_SYNC_A) {
+            if (read_buf[i] == 0x00) {
+                int sync_end = i + 5;
+                for (; i < sync_end && i < n && ctx->collecting; i++)
+                    process_event_byte(ctx, read_buf[i], sdi);
+                i--;
+            }
+        } else {
+            process_event_byte(ctx, read_buf[i], sdi);
+        }
+    }
 
     return ctx->collecting ? TRUE : FALSE;
 }
