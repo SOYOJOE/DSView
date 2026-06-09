@@ -1,19 +1,21 @@
 /*
- * gpio_event.c — MCU-side GPIO Event + Delta Time protocol encoder
+ * gpio_event.c — MCU-side UART_VCD Event Protocol v2 encoder
  *
  * Wire protocol:
- *   [varint delta_time] [varint toggle_mask] ...
- *   delta_time=0 → sync: [0x00] [state_LE_4B]
+ *   [uint24_le delta_ticks] [data_block...]
  *
- * Varint encoding (LE, 7 bits per byte, MSB=continuation):
- *   while value > 0x7F: emit (value & 0x7F) | 0x80; value >>= 7
- *   emit value & 0x7F
+ * delta_ticks: 3-byte LE, raw 24MHz systimer tick count since last event
+ * data_block:  1-byte header + payload, 4-byte aligned
+ *
+ * Header byte:
+ *   bit7:     mode (0=GPIO, 1=string)
+ *   bits6-5:  sub-mode (GPIO: low/high/toggle, String: hex/ascii)
+ *   bits4-0:  param (GPIO: channel 0-23, String: label_len 0-31)
  *
  * TX path: all output goes through the ring buffer (uart_tx_write_byte),
- *          DMA sends data in bulk — no blocking uart_send_byte calls.
+ *          DMA sends data in bulk.
  *
- * All timing uses uint32_t tick subtraction for natural wraparound handling.
- * user_timer_ticks() returns microseconds (stimer_get_tick() / 24).
+ * All timing uses raw 24MHz systimer ticks (stimer_get_tick).
  */
 
 #include "gpio_event.h"
@@ -22,168 +24,148 @@ extern void uart_tx_write_byte(unsigned char byte);
 extern void uart_tx_write_buf(const unsigned char *data, unsigned int len);
 extern void uart_tx_try_send(void);
 
-#define SYNC_INTERVAL_US  (GPIO_EVENT_SYNC_INTERVAL / GPIO_EVENT_TICK_NS)
 
-static uint32_t  g_gpio_state;
-static uint32_t  g_last_ticks;
-static uint32_t  g_last_sync_tick;
-static int       g_initialized;
+/* ─── Internal State ─── */
 
-static void varint_encode(uint32_t value, uint8_t *buf, uint8_t *out_len)
+static uint32_t  g_gpio_state = 0;
+static uint32_t  g_last_tick = 0;      /* raw 24MHz systimer tick */
+static int       g_initialized = 0;
+
+/* ─── GPIO sub-mode ─── */
+#define GPIO_LOW    0x00   /* bits6-5: 00 */
+#define GPIO_HIGH   0x20   /* bits6-5: 01 */
+#define GPIO_TOGGLE 0x40   /* bits6-5: 10 */
+
+/* ─── String sub-mode ─── */
+#define STRING_HEX   0x20   /* bits6-5: 01 (mode=1, sub=00/01) */
+#define STRING_ASCII 0x60   /* bits6-5: 11 (mode=1, sub=10/11) */
+
+/* ─── Send delta(3B LE) + header(1B) as one 4-byte block ─── */
+
+static void send_delta_header(uint32_t delta, uint8_t header)
 {
-    uint8_t *p = buf;
-    while (value > 0x7F) {
-        *p++ = (uint8_t)((value & 0x7F) | 0x80);
-        value >>= 7;
-    }
-    *p++ = (uint8_t)(value & 0x7F);
-    *out_len = (uint8_t)(p - buf);
+    uint8_t buf[4];
+    buf[0] = (uint8_t)(delta);
+    buf[1] = (uint8_t)(delta >> 8);
+    buf[2] = (uint8_t)(delta >> 16);
+    buf[3] = header;
+    uart_tx_write_buf(buf, 4);
 }
 
-static void varint_send(uint32_t value)
-{
-    uint8_t buf[5];
-    uint8_t len;
-    varint_encode(value, buf, &len);
-    uart_tx_write_buf(buf, len);
-}
+/* ─── Core: record a GPIO state transition ─── */
 
-static void send_event(uint32_t delta_ticks, uint32_t toggle_mask)
+static void record_transition(uint32_t new_state, uint8_t sub_mode, int channel)
 {
-    varint_send(delta_ticks);
-    varint_send(toggle_mask);
-}
-
-static void record_transition(uint32_t new_state)
-{
-    uint32_t toggle_mask;
-    uint32_t delta_ticks;
-    uint32_t now;
+    uint32_t now, delta;
 
     if (!g_initialized) return;
 
     user_critical_enter();
-    now = user_timer_ticks();
-    delta_ticks = (uint32_t)(now - g_last_ticks);
-    // if (delta_ticks == 0) delta_ticks = 1;
-    toggle_mask = g_gpio_state ^ new_state;
-
-    if (toggle_mask == 0) {
-        user_critical_exit();
-        return;
-    }
-
+    now   = stimer_get_tick();
+    delta = now - g_last_tick;
+    g_last_tick = now;
     g_gpio_state = new_state;
-    g_last_ticks = now;
     user_critical_exit();
 
-    send_event(delta_ticks, toggle_mask);
+    send_delta_header(delta, sub_mode | (uint8_t)channel);
 }
 
 void gpio_event_init(void)
 {
-    g_gpio_state    = 0;
-    g_last_ticks    = user_timer_ticks();
-    g_last_sync_tick = g_last_ticks;
-    g_initialized   = 1;
+    g_gpio_state   = 0;
+    g_last_tick    = stimer_get_tick();
+    g_initialized  = 1;
+}
 
-    gpio_event_sync();
+void gpio_event_reset_timer(void)
+{
+    if (!g_initialized) return;
+    user_critical_enter();
+    g_last_tick = stimer_get_tick();
+    user_critical_exit();
 }
 
 void gpio_event_high(int channel)
 {
     if ((uint32_t)channel > GPIO_EVENT_GPIO_MAX) return;
-    record_transition(g_gpio_state | (1u << (uint32_t)channel));
+    record_transition(g_gpio_state | (1u << (uint32_t)channel),
+                      GPIO_HIGH, channel);
 }
 
 void gpio_event_low(int channel)
 {
     if ((uint32_t)channel > GPIO_EVENT_GPIO_MAX) return;
-    record_transition(g_gpio_state & ~(1u << (uint32_t)channel));
+    record_transition(g_gpio_state & ~(1u << (uint32_t)channel),
+                      GPIO_LOW, channel);
 }
 
 void gpio_event_toggle(int channel)
 {
     if ((uint32_t)channel > GPIO_EVENT_GPIO_MAX) return;
-    record_transition(g_gpio_state ^ (1u << (uint32_t)channel));
+    record_transition(g_gpio_state ^ (1u << (uint32_t)channel),
+                      GPIO_TOGGLE, channel);
 }
 
 void gpio_event_write(uint32_t mask, uint32_t value)
 {
     mask &= ((1u << (GPIO_EVENT_GPIO_MAX + 1)) - 1);
     value &= mask;
-    record_transition((g_gpio_state & ~mask) | value);
+    record_transition((g_gpio_state & ~mask) | value, GPIO_TOGGLE, 0);
 }
 
-void gpio_event_send_uart_byte(uint8_t byte)
-{
-    uint32_t mask = (uint32_t)0xFF << GPIO_EVENT_UART_OFFSET;
-    uint32_t new_state = (g_gpio_state & ~mask) | (((uint32_t)byte) << GPIO_EVENT_UART_OFFSET);
-    record_transition(new_state);
-}
+/* ─── String event: header + payload, 4-byte aligned ─── */
 
-void gpio_event_send_data(int channel, int len, const uint8_t *data)
+static uint8_t str_buf[300] __attribute__((aligned(4)));
+
+void gpio_event_send_string(int channel, int render_mode,
+                            const uint8_t *label, int label_len,
+                            const uint8_t *data,  int data_len)
 {
-    uint32_t delta_ticks;
-    uint32_t now;
-    uint32_t toggle;
+    uint32_t now, delta;
+    uint8_t  header;
+    uint8_t  total_len;
+    int      payload_len, block_len;
+    uint8_t *p;
 
     if (!g_initialized) return;
     if (channel < 0 || channel > 7) return;
-    if (len <= 0 || !data) return;
-
-    while (len-- > 0) {
-        toggle = GPIO_EVENT_UART_MARKER
-               | (((uint32_t)channel & 0x07) << 8)
-               | (uint32_t)(*data++);
-
-        user_critical_enter();
-        now = user_timer_ticks();
-        delta_ticks = (uint32_t)(now - g_last_ticks);
-        // if (delta_ticks == 0) delta_ticks = 1;
-        g_last_ticks = now;
-        user_critical_exit();
-
-        send_event(delta_ticks, toggle);
-    }
-}
-
-void gpio_event_sync(void)
-{
-    uint32_t now;
-    uint8_t sync_buf[5];
-
-    if (!g_initialized) return;
+    if (label_len < 0 || label_len > 31) return;
+    if (data_len < 0) return;
 
     user_critical_enter();
-    now = user_timer_ticks();
-
-    g_last_sync_tick = now;
-
-    sync_buf[0] = 0x00;
-    sync_buf[1] = (uint8_t)(g_gpio_state);
-    sync_buf[2] = (uint8_t)(g_gpio_state >> 8);
-    sync_buf[3] = (uint8_t)(g_gpio_state >> 16);
-    sync_buf[4] = (uint8_t)(g_gpio_state >> 24);
+    now   = stimer_get_tick();
+    delta = now - g_last_tick;
+    g_last_tick = now;
     user_critical_exit();
 
-    uart_tx_write_buf(sync_buf, 5);
-}
-void gpio_event_poll(void)
-{
-    uint32_t now;
+    /* header: mode=1, sub=render_mode, param=label_len */
+    header = 0x80 | ((uint8_t)(render_mode & 3) << 5) | (uint8_t)(label_len & 0x1F);
+    send_delta_header(delta, header);
 
-    if (!g_initialized) return;
+    /* build payload in str_buf: [channel:1B][total_len:1B][label][data][pad_to_4B] */
+    total_len   = (uint8_t)(label_len + data_len);
+    payload_len = 2 + total_len;
+    block_len   = (payload_len + 3) & ~3;
 
-    now = user_timer_ticks();
-    if ((uint32_t)(now - g_last_sync_tick) >= SYNC_INTERVAL_US) {
-        gpio_event_sync();
+    p = str_buf;
+    *p++ = (uint8_t)channel;
+    *p++ = total_len;
+    if (label && label_len > 0) {
+        memcpy(p, label, label_len);
+        p += label_len;
     }
+    if (data && data_len > 0) {
+        memcpy(p, data, data_len);
+        p += data_len;
+    }
+    memset(p, 0, block_len - payload_len);
 
-    uart_tx_try_send();
+    uart_tx_write_buf(str_buf, block_len);
 }
 
-void gpio_event_flush(void)
+/* ─── DMA flush ─── */
+
+void gpio_event_tx(void)
 {
     uart_tx_try_send();
 }

@@ -35,7 +35,7 @@ extern void main_loop(void);
 int main(void)
 {
     PLATFORM_INIT;
-    CLOCK_INIT;
+    CCLK_24M_HCLK_24M_PCLK_24M;
     user_init();
 
     while (1) {

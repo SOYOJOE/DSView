@@ -38,26 +38,11 @@
 #define UART_VCD_PROTOCOL_EVENT      1
 #define UART_VCD_DEFAULT_PROTOCOL    UART_VCD_PROTOCOL_EVENT
 
-#define UART_VCD_EVENT_TICK_NS       1000
 #define UART_VCD_EVENT_SAMPLERATE_DEFAULT  SR_MHZ(1)
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
-#define UART_VCD_EVENT_DELTA_END     0
 
-#define UART_VCD_UART_MARKER_BIT     31
-#define UART_VCD_UART_MARKER         (1u << UART_VCD_UART_MARKER_BIT)
-#define UART_VCD_UART_CHANNEL_SHIFT  8
-#define UART_VCD_UART_CHANNEL_MASK   0x07
-#define UART_VCD_UART_DATA_MASK      0xFF
-#define UART_VCD_UART_BAUD_RATE      500000
-
-enum event_parse_state {
-    EVENT_PARSE_DELTA_TIME,
-    EVENT_PARSE_TOGGLE_MASK,
-    EVENT_PARSE_SYNC_A,
-    EVENT_PARSE_SYNC_B,
-    EVENT_PARSE_SYNC_C,
-    EVENT_PARSE_SYNC_D,
-};
+#define UART_VCD_MCU_CLOCK_HZ        24000000
+#define UART_VCD_UART_BAUD_RATE      1000000
 
 struct uart_vcd_context {
     int        serial_fd;
@@ -75,21 +60,19 @@ struct uart_vcd_context {
     uint8_t   *batch_buf;
     int        batch_chunk;
     int        protocol;
-    int        event_parse_state;
-    int        event_varint_shift;
-    uint64_t   event_varint_value;
-    uint64_t   event_delta_time;
     uint32_t   gpio_state;
     int        event_sample_pos;
-    uint32_t   sync_state_acc;
-    int        sync_byte_idx;
-    gboolean   sync_locked;
 
     /* per-channel UART TX state */
     uint8_t    uart_tx_data[8];
     int8_t     uart_tx_bit[8];
     int8_t     uart_tx_samp_left[8];
     int8_t     uart_tx_samp_per_bit;
+
+    /* pending byte FIFO per channel */
+    uint8_t    uart_fifo[8][16];
+    uint8_t    uart_fifo_head[8];
+    uint8_t    uart_fifo_tail[8];
 };
 
 static const uint64_t uart_vcd_samplerates[] = {
