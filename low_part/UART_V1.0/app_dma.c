@@ -85,23 +85,34 @@ void uart_tx_write_byte(unsigned char byte)
 
 void uart_tx_write_buf(const unsigned char *data, unsigned int len)
 {
-    unsigned int room;
+    unsigned int room, words, i;
+    uint32_t *dst;
+    const uint32_t *src;
 
     while (len > 0) {
         room = TX_BUF_SIZE - tx_wr_pos;
         if (room >= len) {
-            memcpy(&tx_buf[tx_wr_idx][tx_wr_pos], data, len);
+            dst   = (uint32_t *)&tx_buf[tx_wr_idx][tx_wr_pos];
+            src   = (const uint32_t *)data;
+            words = len >> 2;
+            for (i = 0; i < words; i++) dst[i] = src[i];
+            for (i = words << 2; i < len; i++)
+                tx_buf[tx_wr_idx][tx_wr_pos + i] = data[i];
             tx_wr_pos += len;
             return;
         }
-        /* fill remaining room, flush, continue */
         if (room > 0) {
-            memcpy(&tx_buf[tx_wr_idx][tx_wr_pos], data, room);
+            dst   = (uint32_t *)&tx_buf[tx_wr_idx][tx_wr_pos];
+            src   = (const uint32_t *)data;
+            words = room >> 2;
+            for (i = 0; i < words; i++) dst[i] = src[i];
+            for (i = words << 2; i < room; i++)
+                tx_buf[tx_wr_idx][tx_wr_pos + i] = data[i];
             tx_wr_pos += room;
             data += room;
             len  -= room;
         }
-        if (tx_dma_busy) return;  /* both busy */
+        if (tx_dma_busy) return;
         tx_flush_one();
     }
 }
@@ -205,6 +216,8 @@ void user_critical_exit(void)
 }
 void main_loop(void)
 {
+    unsigned long t = stimer_get_tick();
+  
     gpio_set_high_level(LED1);
     for(int i = 0 ;i < 24; i++){
         gpio_event_toggle(i);
@@ -217,8 +230,11 @@ void main_loop(void)
         gpio_event_send_string(i, 0, (uint8_t *)"a", 1, data, 2);
     }
     gpio_set_low_level(LED2);
-    delay_ms(10);
+    // delay_ms(10);
     uart_tx_poll();
+
+    while (!clock_time_exceed(t, 5 * 1000)) {
+    }
 }
 
 _attribute_ram_code_sec_ void uart0_irq_handler(void)

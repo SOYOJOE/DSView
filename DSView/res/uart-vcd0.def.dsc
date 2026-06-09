@@ -9,8 +9,8 @@
     "Language": 31,
     "Max Height": "1X",
     "Operation Mode": 1,
-    "Sample count": "10000000",
-    "Sample rate": "1000000",
+    "Sample count": "2400000000",
+    "Sample rate": "24000000",
     "Stop Options": 1,
     "Threshold Level": "1",
     "Title": "DSView v1.3.2",
@@ -63,7 +63,7 @@
             "label": "0:UART-RX0",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",
@@ -90,7 +90,7 @@
             "label": "1:UART-RX1",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",
@@ -117,7 +117,7 @@
             "label": "2:UART-RX2",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",
@@ -144,7 +144,7 @@
             "label": "3:UART-RX3",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",
@@ -171,7 +171,7 @@
             "label": "4:UART-RX4",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",
@@ -198,7 +198,7 @@
             "label": "5:UART-RX5",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",
@@ -225,7 +225,7 @@
             "label": "6:UART-RX6",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",
@@ -252,7 +252,7 @@
             "label": "7:UART-RX7",
             "options": {
                 "anno_startstop": "yes",
-                "baudrate": 1000000,
+                "baudrate": 24000000,
                 "bit_order": "lsb-first",
                 "format": "hex",
                 "invert": "no",

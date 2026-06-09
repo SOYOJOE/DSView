@@ -29,7 +29,7 @@
 #define UART_VCD_NUM_PROBES          32
 #define UART_VCD_DEFAULT_SAMPLERATE  SR_KHZ(100)
 #define UART_VCD_DEFAULT_TOTAL_SAMPLES SR_Mn(100)
-#define UART_VCD_BUFSIZE             (1024 * 64)
+#define UART_VCD_BUFSIZE             (1024 * 1024)  /* 1MB input buffer */
 #define UART_VCD_INPUT_WORD_BYTES    4
 #define UART_VCD_SAMPLES_PER_CHUNK   (8 * UART_VCD_INPUT_WORD_BYTES)
 #define UART_VCD_OUTPUT_CHUNK        (UART_VCD_NUM_PROBES * UART_VCD_INPUT_WORD_BYTES)
@@ -38,11 +38,11 @@
 #define UART_VCD_PROTOCOL_EVENT      1
 #define UART_VCD_DEFAULT_PROTOCOL    UART_VCD_PROTOCOL_EVENT
 
-#define UART_VCD_EVENT_SAMPLERATE_DEFAULT  SR_MHZ(1)
+#define UART_VCD_EVENT_SAMPLERATE_DEFAULT  24000000
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
 
 #define UART_VCD_MCU_CLOCK_HZ        24000000
-#define UART_VCD_UART_BAUD_RATE      1000000
+#define UART_VCD_UART_BAUD_RATE      24000000
 
 struct uart_vcd_context {
     int        serial_fd;
@@ -76,7 +76,7 @@ struct uart_vcd_context {
 };
 
 static const uint64_t uart_vcd_samplerates[] = {
-    SR_MHZ(1),
+    24000000,
 };
 
 static const char *uart_vcd_probe_names[] = {

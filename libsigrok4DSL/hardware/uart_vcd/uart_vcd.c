@@ -41,6 +41,7 @@
 #define UART_VCD_OUTPUT_SIZE            (UART_VCD_NUM_PROBES * 8)
 #define UART_VCD_BATCH_CHUNKS           16
 #define UART_VCD_BATCH_OUTPUT_SIZE      (UART_VCD_OUTPUT_SIZE * UART_VCD_BATCH_CHUNKS)
+#define UART_VCD_READ_BUF_SIZE          4096
 
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
 static struct sr_dev_driver *di = &uart_vcd_driver_info;
@@ -81,9 +82,9 @@ static uint32_t uart_tx_process(struct uart_vcd_context *ctx, uint32_t state)
 static void emit_event_sample(struct uart_vcd_context *ctx,
                                const struct sr_dev_inst *sdi)
 {
+    uint32_t state = uart_tx_process(ctx, ctx->gpio_state);
     int byte_idx = ctx->event_sample_pos / 8;
     int bit_idx  = ctx->event_sample_pos % 8;
-    uint32_t state = uart_tx_process(ctx, ctx->gpio_state);
     int ch;
 
     for (ch = 0; ch < UART_VCD_NUM_PROBES; ch++) {
@@ -170,10 +171,11 @@ static void ev2_blow(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi
 
     if (len < 4) return; /* need at least 3B delta + 1B header */
 
-    /* delta_ticks: 3-byte LE */
+    /* delta_ticks: 3-byte LE, 1 tick = 1 sample (both 24MHz) */
     uint32_t delta_raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
-    uint64_t delta_samples = (uint64_t)delta_raw * ctx->samplerate / UART_VCD_MCU_CLOCK_HZ;
-    if (delta_samples > ctx->total_samples) delta_samples = 1; /* timer wrap → discard */
+    uint64_t delta_samples = delta_raw;
+    if (delta_samples > ctx->total_samples) delta_samples = 1;
+    if (delta_samples > 12000000) delta_samples = 12000000;
 
     pos = 3;
 
@@ -529,7 +531,7 @@ static int hw_dev_status_get(const struct sr_dev_inst *sdi, struct sr_status *st
 static int receive_data_raw(int fd, int revents, const struct sr_dev_inst *sdi)
 {
     struct uart_vcd_context *ctx; struct sr_datafeed_packet packet; struct sr_datafeed_logic logic;
-    uint8_t read_buf[UART_VCD_BUFSIZE]; ssize_t n; (void)fd;
+    uint8_t read_buf[UART_VCD_READ_BUF_SIZE]; ssize_t n; (void)fd;
     assert(sdi); assert(sdi->priv); ctx = sdi->priv;
 
     if (!ctx->collecting) { packet.type=SR_DF_END; packet.status=SR_PKT_OK; ds_data_forward(sdi,&packet); return FALSE; }
@@ -576,12 +578,18 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
     if (n < 0) { sr_err("Serial read error: %s", strerror(errno)); return FALSE; }
     if (n == 0) return TRUE;
 
-    if (ctx->input_len + (uint64_t)n <= UART_VCD_BUFSIZE) {
-        memcpy(ctx->input_buf + ctx->input_len, read_buf, n);
-        ctx->input_len += (uint64_t)n;
+    if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {
+        sr_dbg("ev2: input buffer overflow, draining tail");
+        ctx->input_len = 0;
+        if (n > UART_VCD_BUFSIZE) return TRUE;
     }
+    memcpy(ctx->input_buf + ctx->input_len, read_buf, n);
+    ctx->input_len += (uint64_t)n;
 
-    while (ctx->input_len >= 4 && ctx->collecting)
+    uint64_t ev_start = ctx->collected_samples;
+    int ev_count = 0;
+    while (ctx->input_len >= 4 && ctx->collecting &&
+           ctx->collected_samples - ev_start < 786432 && ++ev_count < 512)
         ev2_blow(ctx, sdi);
 
     return ctx->collecting ? TRUE : FALSE;
