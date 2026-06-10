@@ -29,6 +29,10 @@
 #include <termios.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #include <assert.h>
 #include "../../log.h"
 
@@ -282,6 +286,31 @@ static int uart_open(const char *port, int baud_rate)
     return fd;
 }
 
+static int uart_tcp_connect(const char *host, int port)
+{
+    int fd;
+    struct sockaddr_in addr;
+    struct hostent *he;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { sr_err("TCP socket failed: %s", strerror(errno)); return -1; }
+
+    he = gethostbyname(host);
+    if (!he) { sr_err("TCP resolve failed: %s", host); close(fd); return -1; }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    memcpy(&addr.sin_addr, he->h_addr, he->h_length);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        sr_err("TCP connect to %s:%d failed: %s", host, port, strerror(errno));
+        close(fd); return -1;
+    }
+    sr_info("TCP connected to %s:%d", host, port);
+    return fd;
+}
+
 /* ─── Driver callbacks ─── */
 
 static int hw_init(struct sr_context *sr_ctx) { return std_hw_init(sr_ctx, di, LOG_PREFIX); }
@@ -293,7 +322,8 @@ static GSList *hw_scan(GSList *options)
     GSList *devices = NULL; struct stat st; (void)options;
     drvc = di->priv;
     if (drvc->instances) return devices;
-    if (stat(UART_VCD_DEFAULT_SERIAL_PORT, &st) < 0) {
+    if (UART_VCD_DEFAULT_TCP_PORT == 0 &&
+        stat(UART_VCD_DEFAULT_SERIAL_PORT, &st) < 0) {
         sr_info("Serial port %s not found, skipping.", UART_VCD_DEFAULT_SERIAL_PORT);
         return devices;
     }
@@ -303,10 +333,12 @@ static GSList *hw_scan(GSList *options)
     sdi = sr_dev_inst_new(LOGIC, SR_ST_INACTIVE, "FTDI", "FT232R USB UART", NULL);
     if (!sdi) { safe_free(ctx); return NULL; }
     sdi->priv = ctx; sdi->driver = di; sdi->dev_type = DEV_TYPE_USB;
-    ctx->serial_port = g_strdup(UART_VCD_DEFAULT_SERIAL_PORT);
-    ctx->baud_rate   = UART_VCD_DEFAULT_BAUD_RATE;
-    ctx->serial_fd   = -1;
-    ctx->protocol    = UART_VCD_DEFAULT_PROTOCOL;
+    ctx->serial_port       = g_strdup(UART_VCD_DEFAULT_SERIAL_PORT);
+    ctx->baud_rate         = UART_VCD_DEFAULT_BAUD_RATE;
+    ctx->serial_fd         = -1;
+    ctx->tcp_fd            = -1;
+    ctx->tcp_port          = UART_VCD_DEFAULT_TCP_PORT;
+    ctx->protocol          = UART_VCD_DEFAULT_PROTOCOL;
     if (ctx->protocol == UART_VCD_PROTOCOL_EVENT) {
         ctx->samplerate    = UART_VCD_EVENT_SAMPLERATE_DEFAULT;
         ctx->total_samples = UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES;
@@ -354,6 +386,7 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
     if (sdi && sdi->priv) {
         ctx = sdi->priv;
         if (ctx->serial_fd >= 0) { close(ctx->serial_fd); ctx->serial_fd = -1; }
+        if (ctx->tcp_fd >= 0)    { close(ctx->tcp_fd);    ctx->tcp_fd    = -1; }
         safe_free(ctx->input_buf); safe_free(ctx->output_buf); safe_free(ctx->batch_buf);
         sdi->status = SR_ST_INACTIVE; return SR_OK;
     }
@@ -475,14 +508,65 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     memset(ctx->uart_fifo_head, 0, sizeof(ctx->uart_fifo_head));
     memset(ctx->uart_fifo_tail, 0, sizeof(ctx->uart_fifo_tail));
 
-    if (ctx->serial_fd >= 0) {
-        close(ctx->serial_fd); ctx->serial_fd = -1;
-        usleep(100000);
+    if (ctx->tcp_port > 0) {
+        int retries = 50;
+        if (ctx->tcp_fd >= 0) {
+            close(ctx->tcp_fd);
+            ctx->tcp_fd = -1;
+        }
+        sr_info("TCP connecting to %s:%d...", UART_VCD_DEFAULT_TCP_HOST, ctx->tcp_port);
+        while (retries-- > 0) {
+            ctx->tcp_fd = uart_tcp_connect(UART_VCD_DEFAULT_TCP_HOST, ctx->tcp_port);
+            if (ctx->tcp_fd >= 0) break;
+            usleep(100000);
+        }
+        if (ctx->tcp_fd < 0) {
+            sr_err("Failed to connect TCP %s:%d",
+                   UART_VCD_DEFAULT_TCP_HOST, ctx->tcp_port);
+            ctx->collecting = FALSE;
+            return SR_ERR;
+        }
+        {
+            int fl = fcntl(ctx->tcp_fd, F_GETFL, 0);
+            fcntl(ctx->tcp_fd, F_SETFL, fl | O_NONBLOCK);
+        }
+        {
+            uint8_t d[1024];
+            while (read(ctx->tcp_fd, d, sizeof(d)) > 0)
+                ;
+        }
+        ctx->input_len = 0;
+        ctx->gpio_state = 0;
+        memset(ctx->uart_tx_bit, -1, sizeof(ctx->uart_tx_bit));
+        memset(ctx->uart_fifo_head, 0, sizeof(ctx->uart_fifo_head));
+        memset(ctx->uart_fifo_tail, 0, sizeof(ctx->uart_fifo_tail));
+
+        safe_free(ctx->input_buf); safe_free(ctx->output_buf); safe_free(ctx->batch_buf);
+        ctx->input_buf   = malloc(UART_VCD_BUFSIZE);
+        ctx->output_buf  = malloc(UART_VCD_OUTPUT_SIZE);
+        ctx->batch_buf   = malloc(UART_VCD_BATCH_OUTPUT_SIZE);
+        ctx->input_len   = 0;
+        ctx->batch_chunk = 0;
+        if (!ctx->input_buf || !ctx->output_buf || !ctx->batch_buf) {
+            sr_err("Failed to allocate buffers");
+            safe_free(ctx->input_buf); safe_free(ctx->output_buf); safe_free(ctx->batch_buf);
+            return SR_ERR_MALLOC;
+        }
+        memset(ctx->output_buf, 0, UART_VCD_OUTPUT_SIZE);
+
+        sr_info("Start UART VCD acquisition on TCP port %d", ctx->tcp_port);
+
+        sr_session_source_add(ctx->tcp_fd, G_IO_IN, 100, receive_data_event, sdi);
+        return SR_OK;
     }
-    ctx->serial_fd = uart_open(ctx->serial_port, ctx->baud_rate);
+
     if (ctx->serial_fd < 0) {
-        sr_err("Failed to open serial port %s", ctx->serial_port);
-        ctx->collecting = FALSE; return SR_ERR;
+        ctx->serial_fd = uart_open(ctx->serial_port, ctx->baud_rate);
+        if (ctx->serial_fd < 0) {
+            sr_err("Failed to open serial port %s", ctx->serial_port);
+            ctx->collecting = FALSE;
+            return SR_ERR;
+        }
     }
     tcflush(ctx->serial_fd, TCIOFLUSH);
     tcflush(ctx->serial_fd, TCIOFLUSH);
@@ -517,7 +601,8 @@ static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
     (void)cb_data; struct uart_vcd_context *ctx;
     assert(sdi); assert(sdi->priv); ctx = sdi->priv;
     ctx->collecting = FALSE;
-    if (ctx->serial_fd >= 0) { tcflush(ctx->serial_fd, TCIOFLUSH); tcflush(ctx->serial_fd, TCIOFLUSH); }
+    if (ctx->tcp_fd >= 0) { close(ctx->tcp_fd); ctx->tcp_fd = -1; }
+    else if (ctx->serial_fd >= 0) { tcflush(ctx->serial_fd, TCIOFLUSH); tcflush(ctx->serial_fd, TCIOFLUSH); }
     return SR_OK;
 }
 
@@ -537,7 +622,10 @@ static int receive_data_raw(int fd, int revents, const struct sr_dev_inst *sdi)
     if (!ctx->collecting) { packet.type=SR_DF_END; packet.status=SR_PKT_OK; ds_data_forward(sdi,&packet); return FALSE; }
     if (!(revents & G_IO_IN)) return TRUE;
     n = read(fd, read_buf, sizeof(read_buf));
-    if (n < 0) { sr_err("Serial read error: %s", strerror(errno)); return FALSE; }
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return TRUE;
+        sr_err("Serial read error: %s", strerror(errno)); return FALSE;
+    }
     if (n == 0) return TRUE;
     if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) ctx->input_len = 0;
     memcpy(ctx->input_buf + ctx->input_len, read_buf, n);
@@ -575,7 +663,11 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
     if (!(revents & G_IO_IN)) return TRUE;
 
     n = read(fd, read_buf, sizeof(read_buf));
-    if (n < 0) { sr_err("Serial read error: %s", strerror(errno)); return FALSE; }
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return TRUE;
+        sr_err("Serial read error: %s", strerror(errno));
+        return FALSE;
+    }
     if (n == 0) return TRUE;
 
     if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {

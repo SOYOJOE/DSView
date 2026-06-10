@@ -102,8 +102,10 @@ void gpio_event_low(int channel)
 void gpio_event_toggle(int channel)
 {
     if ((uint32_t)channel > GPIO_EVENT_GPIO_MAX) return;
-    record_transition(g_gpio_state ^ (1u << (uint32_t)channel),
-                      GPIO_TOGGLE, channel);
+    if (g_gpio_state & (1u << (uint32_t)channel))
+        gpio_event_low(channel);
+    else
+        gpio_event_high(channel);
 }
 
 void gpio_event_write(uint32_t mask, uint32_t value)

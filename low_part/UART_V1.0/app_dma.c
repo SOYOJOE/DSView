@@ -45,7 +45,7 @@
  * Producer writes to tx_buf[tx_wr_idx]. When buffer fills or flush is
  * requested, DMA starts on it and writer switches to the other half.
  */
-#define TX_BUF_SIZE 4096  /* must be power of 2 and multiple of 4 */
+#define TX_BUF_SIZE (4096)  /* must be power of 2 and multiple of 4 */
 
 static unsigned char tx_buf[2][TX_BUF_SIZE] __attribute__((aligned(4)));
 static volatile int  tx_wr_idx   = 0;
@@ -173,7 +173,7 @@ void user_init(void)
     gpio_input_dis(LED4);
     uart_hw_fsm_reset(UART_MODULE_SEL);
     uart_set_pin(UART_MODULE_SEL, UART0_TX_PIN, UART0_RX_PIN);
-    uart_cal_div_and_bwpc(1000000, sys_clk.pclk * 1000 * 1000, &div, &bwpc);
+    uart_cal_div_and_bwpc(3000000, sys_clk.pclk * 1000 * 1000, &div, &bwpc);
     uart_set_rx_timeout(UART_MODULE_SEL, bwpc, 12, UART_BW_MUL2);
     uart_init(UART_MODULE_SEL, div, bwpc, UART_PARITY_NONE, UART_STOP_BIT_ONE);
     uart_set_tx_dma_config(UART_MODULE_SEL, UART_DMA_CHANNEL_TX);
@@ -219,21 +219,22 @@ void main_loop(void)
     unsigned long t = stimer_get_tick();
   
     gpio_set_high_level(LED1);
-    for(int i = 0 ;i < 24; i++){
+    for(int i = 0 ;i < 1; i++){
         gpio_event_toggle(i);
     }
     gpio_set_low_level(LED1);
 
     gpio_set_high_level(LED2);
-    for(int i = 0 ;i < 8; i++){
-        uint8_t data[2] = {i, 'x'};
-        gpio_event_send_string(i, 0, (uint8_t *)"a", 1, data, 2);
-    }
+    // for(int i = 0 ;i < 8; i++){
+    //     uint8_t data[] = "value";
+    //     int mode = (i < 4) ? 0 : 1;
+    //     gpio_event_send_string(i, mode, (uint8_t *)"lable:", 6, data, 5);
+    // }
     gpio_set_low_level(LED2);
     // delay_ms(10);
     uart_tx_poll();
 
-    while (!clock_time_exceed(t, 5 * 1000)) {
+    while (!clock_time_exceed(t, 15)) {
     }
 }
 

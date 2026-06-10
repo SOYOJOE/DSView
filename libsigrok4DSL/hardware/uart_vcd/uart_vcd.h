@@ -25,6 +25,8 @@
 #include "../../libsigrok-internal.h"
 
 #define UART_VCD_DEFAULT_SERIAL_PORT "/dev/ttyUSB0"
+#define UART_VCD_DEFAULT_TCP_PORT    12345
+#define UART_VCD_DEFAULT_TCP_HOST    "192.168.100.135"
 #define UART_VCD_DEFAULT_BAUD_RATE   1000000
 #define UART_VCD_NUM_PROBES          32
 #define UART_VCD_DEFAULT_SAMPLERATE  SR_KHZ(100)
@@ -46,6 +48,8 @@
 
 struct uart_vcd_context {
     int        serial_fd;
+    int        tcp_fd;
+    int        tcp_port;
     char      *serial_port;
     int        baud_rate;
     uint64_t   samplerate;
