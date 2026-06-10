@@ -70,7 +70,7 @@ static uint32_t uart_tx_process(struct uart_vcd_context *ctx, uint32_t state)
                     ctx->uart_tx_bit[ch] = -1;
                     if (ctx->uart_fifo_head[ch] != ctx->uart_fifo_tail[ch]) {
                         ctx->uart_tx_data[ch] = ctx->uart_fifo[ch][ctx->uart_fifo_tail[ch]];
-                        ctx->uart_fifo_tail[ch] = (ctx->uart_fifo_tail[ch] + 1) & 0x0F;
+                        ctx->uart_fifo_tail[ch] = (ctx->uart_fifo_tail[ch] + 1) & 0x3F;
                         ctx->uart_tx_bit[ch] = 0;
                         ctx->uart_tx_samp_left[ch] = ctx->uart_tx_samp_per_bit;
                     }
@@ -187,10 +187,13 @@ static void ev2_blow(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi
     uint8_t header = p[pos++];
 
     if (header & 0x80) {
-        /* mode=1: string */
-        int label_len = header & 0x1F;
+        /* mode=1: string — sub=render(00=hex,01=ascii), param=label_len */
+        int label_len  = header & 0x1F;
+        int render_sub = (header >> 5) & 0x03; /* 0=hex, 1=ascii */
+        (void)render_sub; /* reserved for future string display */
 
         if (len < pos + 2) return;
+        /* payload: [channel:1B][total_len:1B][label:label_len B][data:(total_len-label_len) B][pad] */
 
         uint8_t ch_byte   = p[pos++];
         int     channel   = ch_byte & 0x07;
@@ -207,13 +210,49 @@ static void ev2_blow(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi
         /* emit delta idle BEFORE string frame */
         ev2_emit_samples(ctx, sdi, delta_samples);
 
-        /* feed label + data bytes to UART FIFO, set idle HIGH */
+        /* feed label (always ASCII) + data (hex or ascii) to UART FIFO */
         ctx->gpio_state |= (1u << (24 + channel));
-        for (int d = 0; d < label_len + data_len; d++) {
-            uint8_t next = (ctx->uart_fifo_head[channel] + 1) & 0x0F;
-            if (next != ctx->uart_fifo_tail[channel]) {
-                ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]] = p[pos + d];
-                ctx->uart_fifo_head[channel] = next;
+        {
+            const uint8_t *src = p + pos;
+            int d;
+
+            /* label: always raw ASCII */
+            for (d = 0; d < label_len; d++) {
+                uint8_t nxt = (ctx->uart_fifo_head[channel] + 1) & 0x3F;
+                if (nxt != ctx->uart_fifo_tail[channel]) {
+                    ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]] = src[d];
+                    ctx->uart_fifo_head[channel] = nxt;
+                }
+            }
+            src += label_len;
+
+            /* data: hex → 2-char ASCII or raw ASCII */
+            for (d = 0; d < data_len; d++) {
+                uint8_t b = src[d];
+                if (render_sub == 0) {
+                    /* hex mode: each byte → 2 hex ASCII chars */
+                    static const char hexc[] = "0123456789ABCDEF";
+                    uint8_t hi = (uint8_t)hexc[(b >> 4) & 0x0F];
+                    uint8_t lo = (uint8_t)hexc[b & 0x0F];
+                    uint8_t nxt;
+                    nxt = (ctx->uart_fifo_head[channel] + 1) & 0x3F;
+                    if (nxt != ctx->uart_fifo_tail[channel]) {
+                        ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]] = hi;
+                        ctx->uart_fifo_head[channel] = nxt;
+                    }
+                    nxt = (ctx->uart_fifo_head[channel] + 1) & 0x3F;
+                    if (nxt != ctx->uart_fifo_tail[channel]) {
+                        ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]] = lo;
+                        ctx->uart_fifo_head[channel] = nxt;
+                    }
+                } else {
+                    /* ascii mode: raw byte */
+                    uint8_t nxt = (ctx->uart_fifo_head[channel] + 1) & 0x3F;
+                    if (nxt != ctx->uart_fifo_tail[channel]) {
+                        ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]] = b;
+                        ctx->uart_fifo_head[channel] = nxt;
+                    }
+                }
             }
         }
         pos += label_len + data_len;
@@ -225,14 +264,14 @@ static void ev2_blow(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi
         if (ctx->uart_tx_bit[channel] < 0 &&
             ctx->uart_fifo_head[channel] != ctx->uart_fifo_tail[channel]) {
             ctx->uart_tx_data[channel] = ctx->uart_fifo[channel][ctx->uart_fifo_tail[channel]];
-            ctx->uart_fifo_tail[channel] = (ctx->uart_fifo_tail[channel] + 1) & 0x0F;
+            ctx->uart_fifo_tail[channel] = (ctx->uart_fifo_tail[channel] + 1) & 0x3F;
             ctx->uart_tx_bit[channel] = 0;
             ctx->uart_tx_samp_left[channel] = ctx->uart_tx_samp_per_bit;
         }
 
     } else {
         /* mode=0: GPIO */
-        uint8_t sub = (header >> 5) & 0x03;
+        uint8_t sub = (header >> 5) & 0x03; /* 0=low, 1=high, 2=toggle */
         int channel = header & 0x1F;
 
         /* emit delta IDLE before state change */

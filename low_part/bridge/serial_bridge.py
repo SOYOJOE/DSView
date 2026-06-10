@@ -1,16 +1,28 @@
-
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 serial_bridge.py
 
-MCU UART -> RingBuffer -> TCP (DSView)
+DSView UART -> TCP Bridge
 
-Features:
-    - UART always running
-    - Fixed-size ring buffer
-    - Old data overwritten when full
-    - TCP reconnect supported
-    - New client receives latest data only
+Features
+--------
+- UART @ 3Mbps
+- TCP Server
+- DSView reconnect supported
+- TCP disconnected => discard UART data
+- TCP connected => realtime forwarding
+- 1s statistics update
+- Ctrl+C graceful exit
+- Windows/Linux/macOS
+
+Usage
+-----
+python serial_bridge.py [tcp_port]
+
+Default TCP port:
+12345
 """
 
 import sys
@@ -20,79 +32,43 @@ import serial
 import threading
 import serial.tools.list_ports
 
+
 TCP_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 12345
 BAUD_RATE = 3000000
 
-RING_BUFFER_SIZE = 1024 * 1024  # 1MB
+READ_SIZE = 4096
 
 
 # ============================================================
-# Ring Buffer
+# Statistics
 # ============================================================
 
-class RingBuffer:
-    def __init__(self, size):
-        self.size = size
-        self.buf = bytearray(size)
-
-        self.write_pos = 0
-        self.total_written = 0
-
+class Statistics:
+    def __init__(self):
         self.lock = threading.Lock()
 
-    def write(self, data):
-        n = len(data)
+        self.rx_bytes = 0
+        self.tx_bytes = 0
 
+        self.client_connected = False
+
+    def add_rx(self, size):
         with self.lock:
+            self.rx_bytes += size
 
-            if n >= self.size:
-                data = data[-self.size:]
-                n = len(data)
-
-            end = self.write_pos + n
-
-            if end <= self.size:
-                self.buf[self.write_pos:end] = data
-            else:
-                first = self.size - self.write_pos
-                self.buf[self.write_pos:] = data[:first]
-                self.buf[:end % self.size] = data[first:]
-
-            self.write_pos = end % self.size
-            self.total_written += n
-
-    def get_latest_position(self):
+    def add_tx(self, size):
         with self.lock:
-            return self.total_written
+            self.tx_bytes += size
 
-    def read_from(self, position, max_len=65536):
-
+    def snapshot(self):
         with self.lock:
+            rx = self.rx_bytes
+            tx = self.tx_bytes
 
-            available = self.total_written - position
+            self.rx_bytes = 0
+            self.tx_bytes = 0
 
-            if available <= 0:
-                return b'', position
-
-            if available > self.size:
-                position = self.total_written - self.size
-                available = self.size
-
-            length = min(available, max_len)
-
-            start = position % self.size
-            end = start + length
-
-            if end <= self.size:
-                data = bytes(self.buf[start:end])
-            else:
-                first = self.size - start
-                data = (
-                        bytes(self.buf[start:])
-                        + bytes(self.buf[:end % self.size])
-                )
-
-            return data, position + length
+        return rx, tx
 
 
 # ============================================================
@@ -106,22 +82,26 @@ def scan_serial_ports():
 def select_serial_port(ports):
 
     if not ports:
-        print("No serial ports found")
+        print("No serial ports found.")
         sys.exit(1)
 
     print("\nAvailable serial ports:")
 
-    for i, p in enumerate(ports):
-        print(f" [{i}] {p}")
+    for i, port in enumerate(ports):
+        print(f"  [{i}] {port}")
 
     if len(ports) == 1:
-        print(f"Auto-selected: {ports[0]}")
+        print(f"\nAuto-selected: {ports[0]}")
         return ports[0]
 
     while True:
 
         try:
-            idx = int(input("Select port: "))
+            idx = int(
+                input(
+                    f"\nSelect port [0-{len(ports)-1}]: "
+                )
+            )
 
             if 0 <= idx < len(ports):
                 return ports[idx]
@@ -129,110 +109,136 @@ def select_serial_port(ports):
         except Exception:
             pass
 
+        print("Invalid selection.")
+
 
 # ============================================================
-# UART Reader
+# Shared Context
 # ============================================================
 
-def uart_reader(ser, ring):
+class BridgeContext:
 
-    rx_bytes = 0
-    last_tick = time.time()
+    def __init__(self):
 
-    while True:
+        self.lock = threading.Lock()
+
+        self.conn = None
+        self.connected = False
+
+    def set_connection(self, conn):
+
+        with self.lock:
+            self.conn = conn
+            self.connected = True
+
+    def clear_connection(self):
+
+        with self.lock:
+
+            if self.conn:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+
+            self.conn = None
+            self.connected = False
+
+    def get_connection(self):
+
+        with self.lock:
+            return self.conn
+
+    def is_connected(self):
+
+        with self.lock:
+            return self.connected
+
+
+# ============================================================
+# UART Thread
+# ============================================================
+
+def uart_worker(
+        ser,
+        ctx,
+        stats,
+        stop_event
+):
+
+    while not stop_event.is_set():
 
         try:
-            data = ser.read(16384)
 
-            if data:
-                ring.write(data)
-                rx_bytes += len(data)
+            data = ser.read(READ_SIZE)
 
-            now = time.time()
+            if not data:
+                continue
 
-            if now - last_tick >= 1:
+            stats.add_rx(len(data))
 
-                mbps = rx_bytes * 8 / 1000000
+            if not ctx.is_connected():
+                # TCP断开时直接丢弃
+                continue
 
-                print(
-                    f"\rUART RX: {mbps:.2f} Mbps",
-                    end="",
-                    flush=True
-                )
+            conn = ctx.get_connection()
 
-                rx_bytes = 0
-                last_tick = now
+            if conn is None:
+                continue
+
+            try:
+
+                conn.sendall(data)
+
+                stats.add_tx(len(data))
+
+            except (
+                    BrokenPipeError,
+                    ConnectionResetError,
+                    OSError
+            ):
+
+                ctx.clear_connection()
+                stats.client_connected = False
 
         except serial.SerialException as e:
 
-            print(f"\nSerial error: {e}")
+            print(f"\nUART error: {e}")
 
-            time.sleep(1)
+            stop_event.set()
+            break
 
 
 # ============================================================
-# TCP Sender
+# Status Thread
 # ============================================================
 
-def tcp_stream_client(conn, ring):
+def status_worker(
+        stats,
+        stop_event
+):
 
-    try:
+    while not stop_event.wait(1):
 
-        conn.setsockopt(socket.IPPROTO_TCP,
-                        socket.TCP_NODELAY,
-                        1)
+        rx, tx = stats.snapshot()
 
-        # 从最新位置开始
-        position = ring.get_latest_position()
+        rx_mbps = rx * 8 / 1000000
+        tx_mbps = tx * 8 / 1000000
 
-        tx_bytes = 0
-        last_tick = time.time()
+        state = (
+            "CONNECTED"
+            if stats.client_connected
+            else "WAITING"
+        )
 
-        while True:
-
-            data, position = ring.read_from(
-                position,
-                max_len=32768
-            )
-
-            if not data:
-                time.sleep(0.001)
-                continue
-
-            conn.sendall(data)
-
-            tx_bytes += len(data)
-
-            now = time.time()
-
-            if now - last_tick >= 1:
-
-                mbps = tx_bytes * 8 / 1000000
-
-                print(
-                    f"\rTCP TX : {mbps:.2f} Mbps",
-                    end="",
-                    flush=True
-                )
-
-                tx_bytes = 0
-                last_tick = now
-
-    except (
-            BrokenPipeError,
-            ConnectionResetError,
-            OSError
-    ):
-        pass
-
-    finally:
-
-        try:
-            conn.close()
-        except:
-            pass
-
-        print("\nClient disconnected")
+        print(
+            "\r"
+            f"UART RX: {rx_mbps:6.2f} Mbps | "
+            f"TCP TX: {tx_mbps:6.2f} Mbps | "
+            f"{state:10}",
+            end="",
+            flush=True
+        )
 
 
 # ============================================================
@@ -241,13 +247,15 @@ def tcp_stream_client(conn, ring):
 
 def main():
 
-    port = select_serial_port(scan_serial_ports())
+    serial_port = select_serial_port(
+        scan_serial_ports()
+    )
 
     try:
 
         ser = serial.Serial(
-            port,
-            BAUD_RATE,
+            port=serial_port,
+            baudrate=BAUD_RATE,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
@@ -256,17 +264,35 @@ def main():
 
     except Exception as e:
 
-        print(e)
+        print(f"Open serial failed: {e}")
         return
 
-    print(f"Serial : {port}")
+    print(f"\nSerial : {serial_port}")
     print(f"Baud   : {BAUD_RATE}")
 
-    ring = RingBuffer(RING_BUFFER_SIZE)
+    ctx = BridgeContext()
+
+    stats = Statistics()
+
+    stop_event = threading.Event()
 
     threading.Thread(
-        target=uart_reader,
-        args=(ser, ring),
+        target=uart_worker,
+        args=(
+            ser,
+            ctx,
+            stats,
+            stop_event
+        ),
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=status_worker,
+        args=(
+            stats,
+            stop_event
+        ),
         daemon=True
     ).start()
 
@@ -284,36 +310,80 @@ def main():
     srv.bind(("0.0.0.0", TCP_PORT))
     srv.listen(1)
 
-    print(f"TCP listen : {TCP_PORT}")
+    srv.settimeout(0.5)
+
+    print(f"TCP    : Listen on {TCP_PORT}")
+    print("\nWaiting for DSView ...")
 
     try:
 
-        while True:
+        while not stop_event.is_set():
 
-            print("\nWaiting for DSView...")
+            try:
 
-            conn, addr = srv.accept()
+                conn, addr = srv.accept()
+
+            except socket.timeout:
+                continue
 
             print(
-                f"Client connected: "
+                f"\nClient connected: "
                 f"{addr[0]}:{addr[1]}"
             )
 
-            tcp_stream_client(
-                conn,
-                ring
+            #
+            # 丢弃断线期间积压的数据
+            #
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                pass
+
+            conn.setsockopt(
+                socket.IPPROTO_TCP,
+                socket.TCP_NODELAY,
+                1
             )
+
+            ctx.set_connection(conn)
+
+            stats.client_connected = True
+
+            #
+            # 等待连接断开
+            #
+            while (
+                    not stop_event.is_set()
+                    and ctx.is_connected()
+            ):
+                time.sleep(0.1)
+
+            stats.client_connected = False
+
+            print("\nClient disconnected")
 
     except KeyboardInterrupt:
 
-        pass
+        print("\n\nCtrl+C received")
 
     finally:
 
-        srv.close()
-        ser.close()
+        stop_event.set()
+
+        ctx.clear_connection()
+
+        try:
+            srv.close()
+        except Exception:
+            pass
+
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+        print("Shutdown complete")
 
 
 if __name__ == "__main__":
     main()
-

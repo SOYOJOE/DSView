@@ -74,7 +74,7 @@ struct uart_vcd_context {
     int8_t     uart_tx_samp_per_bit;
 
     /* pending byte FIFO per channel */
-    uint8_t    uart_fifo[8][16];
+    uint8_t    uart_fifo[8][64];
     uint8_t    uart_fifo_head[8];
     uint8_t    uart_fifo_tail[8];
 };
