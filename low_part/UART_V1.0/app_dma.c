@@ -117,6 +117,29 @@ void uart_tx_write_buf(const unsigned char *data, unsigned int len)
     }
 }
 
+void uart_tx_write_fast4(const uint8_t data[4])
+{
+    if (tx_wr_pos + 4 > TX_BUF_SIZE) {
+        if (tx_dma_busy) return;
+        tx_flush_one();
+        if (tx_wr_pos + 4 > TX_BUF_SIZE) return;
+    }
+    *(uint32_t *)(tx_buf[tx_wr_idx] + tx_wr_pos) = *(const uint32_t *)data;
+    tx_wr_pos += 4;
+}
+
+uint8_t *uart_tx_reserve(unsigned int n)
+{
+    if (tx_dma_busy) return NULL;
+    if (tx_wr_pos + n > TX_BUF_SIZE) {
+        tx_flush_one();
+        if (tx_dma_busy || tx_wr_pos + n > TX_BUF_SIZE) return NULL;
+    }
+    uint8_t *p = tx_buf[tx_wr_idx] + tx_wr_pos;
+    tx_wr_pos += n;
+    return p;
+}
+
 unsigned int uart_tx_ring_used(void)
 {
     return tx_wr_pos + (tx_dma_busy ? TX_BUF_SIZE : 0);
@@ -186,8 +209,6 @@ void user_init(void)
     uart_set_irq_mask(UART_MODULE_SEL, UART_RXDONE_MASK);
     uart_receive_dma(UART_MODULE_SEL, (unsigned char *)rec_buff, DMA_REV_LEN);
 
-    tx_last_us_tick = stimer_get_tick() ;
-
     gpio_event_init();
 }
 
@@ -219,22 +240,23 @@ void main_loop(void)
     unsigned long t = stimer_get_tick();
   
     gpio_set_high_level(LED1);
-    for(int i = 0 ;i < 1; i++){
+    for(int i = 0 ;i < 24; i++){
         gpio_event_toggle(i);
     }
     gpio_set_low_level(LED1);
 
     gpio_set_high_level(LED2);
-    // for(int i = 0 ;i < 8; i++){
-    //     uint8_t data[] = "value";
-    //     int mode = (i < 4) ? 0 : 1;
-    //     gpio_event_send_string(i, mode, (uint8_t *)"lable:", 6, data, 5);
-    // }
+    static uint8_t data[] = {0,'a','l','u','e'};
+    for(int i = 0 ;i < 8; i++){
+        int mode = (i < 4) ? 0 : 1;
+        gpio_event_send_string(i, mode, (uint8_t *)"lable:", 6, data, 5);
+    }
+    data[0]++;
     gpio_set_low_level(LED2);
     // delay_ms(10);
     uart_tx_poll();
 
-    while (!clock_time_exceed(t, 15)) {
+    while (!clock_time_exceed(t, 1000)) {
     }
 }
 
