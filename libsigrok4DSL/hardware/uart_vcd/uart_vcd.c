@@ -24,11 +24,11 @@
 
 #define UART_VCD_SAMPLES_PER_OUTPUT     64
 #define UART_VCD_OUTPUT_SIZE            (UART_VCD_NUM_PROBES * 8)
-#define UART_VCD_BATCH_CHUNKS           16
+#define UART_VCD_BATCH_CHUNKS           256
 #define UART_VCD_BATCH_OUTPUT_SIZE      (UART_VCD_OUTPUT_SIZE * UART_VCD_BATCH_CHUNKS)
 #define UART_VCD_READ_BUF_SIZE          65536
-#define UART_VCD_EVENT_LIMIT            512
-#define UART_VCD_SAMPLE_LIMIT           786432
+#define UART_VCD_EVENT_LIMIT            2048
+#define UART_VCD_SAMPLE_LIMIT           3145728
 #define UART_VCD_DELTA_CLAMP            12000000
 
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
@@ -255,6 +255,7 @@ static int tcp_reconnect(struct uart_vcd_context *ctx)
     }
     if (ctx->tcp_fd<0) { sr_err("TCP connect failed"); return SR_ERR; }
     { int fl=fcntl(ctx->tcp_fd,F_GETFL,0); fcntl(ctx->tcp_fd,F_SETFL,fl|O_NONBLOCK); }
+    { int rcvbuf=524288; setsockopt(ctx->tcp_fd,SOL_SOCKET,SO_RCVBUF,&rcvbuf,sizeof(rcvbuf)); }
     { uint8_t d[1024]; while (read(ctx->tcp_fd,d,sizeof(d))>0); }
     ctx->input_len=0; ctx->input_offset=0; ctx->gpio_state=0;
     memset(ctx->uart_tx_bit,-1,sizeof(ctx->uart_tx_bit));
@@ -447,41 +448,53 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
                             ds_data_forward(sdi,&pkt); return FALSE; }
     if (!(revents & G_IO_IN)) return TRUE;
 
-    while (1) {
-        ssize_t n = read(fd, read_buf, sizeof(read_buf));
-        if (n < 0) { if (errno==EAGAIN||errno==EWOULDBLOCK) break;
-                     sr_err("read error: %s",strerror(errno)); return FALSE; }
-        if (n == 0) break;
-        if (!ctx->collecting) break;
-
-        if ((uint64_t)n > UART_VCD_BUFSIZE - ctx->input_offset - ctx->input_len) {
-            sr_info("input overflow, discarding buffered data");
-            ctx->input_len = 0;
-            ctx->input_offset = 0;
-            ssize_t keep = n;
-            if ((uint64_t)keep > UART_VCD_BUFSIZE) keep = UART_VCD_BUFSIZE;
-            memcpy(ctx->input_buf + ctx->input_len, read_buf, keep);
-            ctx->input_len = (uint64_t)keep;
-            continue;
-        }
-
-        memcpy(ctx->input_buf + ctx->input_offset + ctx->input_len, read_buf, n);
-        ctx->input_len += (uint64_t)n;
-    }
-
     {
         uint64_t es=ctx->collected_samples; int ec=0;
-        while (ctx->collecting && (uint64_t)ctx->input_len>=4 &&
-               ctx->collected_samples-es < UART_VCD_SAMPLE_LIMIT && ++ec < UART_VCD_EVENT_LIMIT) {
-            int c=ev2_blow_buf(ctx, sdi, ctx->input_buf + ctx->input_offset, (int)ctx->input_len);
-            if (c==0) break;
-            ctx->input_offset += c;
-            ctx->input_len   -= c;
-        }
-        if (ctx->input_offset > (UART_VCD_BUFSIZE >> 1)) {
-            if (ctx->input_len > 0)
-                memmove(ctx->input_buf, ctx->input_buf + ctx->input_offset, ctx->input_len);
-            ctx->input_offset = 0;
+
+        while (ctx->collecting && ec < UART_VCD_EVENT_LIMIT &&
+               ctx->collected_samples-es < UART_VCD_SAMPLE_LIMIT) {
+
+            while (ctx->collecting && ctx->input_len >= 4 &&
+                   ec < UART_VCD_EVENT_LIMIT &&
+                   ctx->collected_samples-es < UART_VCD_SAMPLE_LIMIT) {
+                int c=ev2_blow_buf(ctx, sdi, ctx->input_buf + ctx->input_offset, (int)ctx->input_len);
+                if (c==0) break;
+                ctx->input_offset += c;
+                ctx->input_len   -= c;
+                ec++;
+            }
+
+            if (!ctx->collecting) break;
+            if (ec >= UART_VCD_EVENT_LIMIT) break;
+            if (ctx->collected_samples-es >= UART_VCD_SAMPLE_LIMIT) break;
+
+            if (ctx->input_offset) {
+                if (ctx->input_len > 0)
+                    memmove(ctx->input_buf, ctx->input_buf + ctx->input_offset, ctx->input_len);
+                ctx->input_offset = 0;
+            }
+
+            {
+                ssize_t n = read(fd, read_buf, sizeof(read_buf));
+                if (n < 0) { if (errno==EAGAIN||errno==EWOULDBLOCK) break;
+                             sr_err("read error: %s",strerror(errno)); return FALSE; }
+                if (n == 0) break;
+
+                if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {
+                    sr_info("input overflow, discarding buffered data");
+                    ctx->input_len = 0;
+                    {
+                        ssize_t keep = n;
+                        if ((uint64_t)keep > UART_VCD_BUFSIZE) keep = UART_VCD_BUFSIZE;
+                        memcpy(ctx->input_buf, read_buf, keep);
+                        ctx->input_len = (uint64_t)keep;
+                    }
+                    continue;
+                }
+
+                memcpy(ctx->input_buf + ctx->input_len, read_buf, n);
+                ctx->input_len += (uint64_t)n;
+            }
         }
     }
     return ctx->collecting ? TRUE : FALSE;
