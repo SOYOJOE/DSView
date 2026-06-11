@@ -36,6 +36,7 @@ struct uart_vcd_context {
     gboolean   is_loop;
     uint8_t   *input_buf;
     uint64_t   input_len;
+    uint64_t   input_offset;
     uint8_t   *output_buf;
     uint8_t   *batch_buf;
     int        batch_chunk;
