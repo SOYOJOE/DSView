@@ -341,7 +341,7 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
     case SR_CONF_HW_DEPTH: *data=g_variant_new_uint64(ctx->total_samples); break;
     case SR_CONF_UNIT_BITS: *data=g_variant_new_byte(1); break;
     case SR_CONF_VLD_CH_NUM: *data=g_variant_new_int16(ctx->num_probes); break;
-    case SR_CONF_PROBE_EN: if (ch) *data=g_variant_new_boolean(ch->enabled); else return SR_ERR; break;
+    case SR_CONF_PROBE_EN: if (ch) *data=g_variant_new_boolean(TRUE); else return SR_ERR; break;
     case SR_CONF_HAVE_ZERO: *data=g_variant_new_boolean(FALSE); break;
     case SR_CONF_LOAD_DECODER: *data=g_variant_new_boolean(TRUE); break;
     case SR_CONF_RLE: *data=g_variant_new_boolean(FALSE); break;
@@ -362,7 +362,7 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
     switch (id) {
     case SR_CONF_SAMPLERATE: ctx->samplerate=g_variant_get_uint64(data); break;
     case SR_CONF_LIMIT_SAMPLES: ctx->total_samples=g_variant_get_uint64(data); break;
-    case SR_CONF_PROBE_EN: if (ch) ch->enabled=g_variant_get_boolean(data); break;
+    case SR_CONF_PROBE_EN: (void)ch; break; /* always enabled */
     case SR_CONF_DEVICE_MODE: sdi->mode=g_variant_get_int16(data); break;
     case SR_CONF_LOOP_MODE: ctx->is_loop=g_variant_get_boolean(data); break;
     default: break;

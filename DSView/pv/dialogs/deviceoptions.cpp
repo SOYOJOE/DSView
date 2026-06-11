@@ -199,15 +199,20 @@ void DeviceOptions::accept()
 
     // Commit the probes
     int mode = _device_agent->get_work_mode();
+    int is_uart_vcd = (_device_agent->driver_name() == "uart-vcd");
     if (mode == LOGIC || mode == ANALOG) {
-        int index = 0;
-        for (const GSList *l = _device_agent->get_channels(); l; l = l->next) {
-            sr_channel *const probe = (sr_channel*)l->data;
-            assert(probe);
-            probe->enabled = _probes_checkBox_list.at(index)->isChecked();
-            index++;
-            if (probe->enabled)
-                hasEnabled = true;
+        if (!is_uart_vcd) {
+            int index = 0;
+            for (const GSList *l = _device_agent->get_channels(); l; l = l->next) {
+                sr_channel *const probe = (sr_channel*)l->data;
+                assert(probe);
+                probe->enabled = _probes_checkBox_list.at(index)->isChecked();
+                index++;
+                if (probe->enabled)
+                    hasEnabled = true;
+            }
+        } else {
+            hasEnabled = true;
         }
     }
     else {
@@ -381,6 +386,14 @@ void DeviceOptions::logic_probes(QVBoxLayout &layout)
 
     layout.addWidget(channel_pannel);
 
+    int is_uart_vcd = (_device_agent->driver_name() == "uart-vcd");
+    if (is_uart_vcd) {
+        for (auto box : _probes_checkBox_list) {
+            box->setCheckState(Qt::Checked);
+            box->setEnabled(false);
+        }
+    }
+
     // space
     QWidget *space = new QWidget();
     space->setFixedHeight(10);
@@ -388,6 +401,7 @@ void DeviceOptions::logic_probes(QVBoxLayout &layout)
     contentHeight += 10;
  
     // buttons
+    if (!is_uart_vcd) {
     QHBoxLayout *line_lay = new QHBoxLayout();
     layout.addLayout(line_lay);
     line_lay->setSpacing(10);
@@ -415,6 +429,9 @@ void DeviceOptions::logic_probes(QVBoxLayout &layout)
 
     line_lay->addWidget(enable_all_probes);
     line_lay->addWidget(disable_all_probes);
+    } else {
+        contentHeight += channel_line_height * row2 + 50;
+    }
 
     _groupHeight2 = contentHeight + (row1 + row2) * 2 + 38;
 
