@@ -30,7 +30,6 @@
 #define UART_VCD_EVENT_LIMIT            2048
 #define UART_VCD_SAMPLE_LIMIT           3145728
 #define UART_VCD_DELTA_CLAMP            12000000
-#define UART_VCD_LOOP_WINDOW_MAX       SR_Mn(2500)
 
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
 static struct sr_dev_driver *di = &uart_vcd_driver_info;
@@ -362,11 +361,7 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
     (void)cg; struct uart_vcd_context *ctx; assert(sdi->priv); ctx=sdi->priv;
     switch (id) {
     case SR_CONF_SAMPLERATE: ctx->samplerate=g_variant_get_uint64(data); break;
-    case SR_CONF_LIMIT_SAMPLES:
-        ctx->total_samples = g_variant_get_uint64(data);
-        if (ctx->total_samples < UART_VCD_LOOP_WINDOW_MAX)
-            ctx->total_samples = UART_VCD_LOOP_WINDOW_MAX;
-        break;
+    case SR_CONF_LIMIT_SAMPLES: ctx->total_samples=g_variant_get_uint64(data); break;
     case SR_CONF_PROBE_EN: (void)ch; break; /* always enabled */
     case SR_CONF_DEVICE_MODE: sdi->mode=g_variant_get_int16(data); break;
     case SR_CONF_LOOP_MODE: ctx->is_loop=g_variant_get_boolean(data); break;
