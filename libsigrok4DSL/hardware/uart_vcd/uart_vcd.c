@@ -156,7 +156,8 @@ static int ev2_blow_buf(struct uart_vcd_context *ctx, const struct sr_dev_inst *
 
     uint32_t delta_raw = (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16);
     uint64_t delta_samples = delta_raw;
-    if (delta_samples > ctx->total_samples) delta_samples = 1;
+    if (ctx->first_event) { ctx->first_event = FALSE; delta_samples = 1; }
+    else if (delta_samples > ctx->total_samples) delta_samples = 1;
     if (delta_samples > UART_VCD_DELTA_CLAMP) delta_samples = UART_VCD_DELTA_CLAMP;
 
     pos=3;
@@ -269,6 +270,7 @@ static int tcp_reconnect(struct uart_vcd_context *ctx)
     { int rcvbuf=524288; setsockopt(ctx->tcp_fd,SOL_SOCKET,SO_RCVBUF,&rcvbuf,sizeof(rcvbuf)); }
     { uint8_t d[1024]; while (read(ctx->tcp_fd,d,sizeof(d))>0); }
     ctx->input_len=0; ctx->input_offset=0; ctx->gpio_state=0;
+    ctx->first_event=TRUE;
     memset(ctx->uart_tx_bit,-1,sizeof(ctx->uart_tx_bit));
     memset(ctx->uart_fifo_head,0,sizeof(ctx->uart_fifo_head));
     memset(ctx->uart_fifo_tail,0,sizeof(ctx->uart_fifo_tail));

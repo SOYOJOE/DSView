@@ -36,6 +36,7 @@ struct uart_vcd_context {
     int        num_probes;
     gboolean   collecting;
     gboolean   is_loop;
+    gboolean   first_event;
     uint8_t   *input_buf;
     uint64_t   input_len;
     uint64_t   input_offset;
