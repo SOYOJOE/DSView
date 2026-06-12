@@ -338,7 +338,7 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
     case SR_CONF_SAMPLERATE: *data=g_variant_new_uint64(ctx->samplerate); break;
     case SR_CONF_LIMIT_SAMPLES: *data=g_variant_new_uint64(ctx->total_samples); break;
     case SR_CONF_DEVICE_MODE: *data=g_variant_new_int16(sdi->mode); break;
-    case SR_CONF_HW_DEPTH: *data=g_variant_new_uint64(ctx->total_samples); break;
+    case SR_CONF_HW_DEPTH: *data=g_variant_new_uint64(UART_VCD_MAX_HW_DEPTH); break;
     case SR_CONF_UNIT_BITS: *data=g_variant_new_byte(1); break;
     case SR_CONF_VLD_CH_NUM: *data=g_variant_new_int16(ctx->num_probes); break;
     case SR_CONF_PROBE_EN: if (ch) *data=g_variant_new_boolean(TRUE); else return SR_ERR; break;
