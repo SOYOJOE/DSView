@@ -1861,14 +1861,9 @@ namespace pv
         std::lock_guard<std::mutex> lock(_decode_task_mutex);
         _decode_tasks.push_back(trace);
 
-        if (!_is_decoding)
-        {
-            if (_decode_thread.joinable())
-                _decode_thread.join();
-
-            _decode_thread = std::thread(&SigSession::decode_task_proc, this);
-            _is_decoding = true;
-        }
+        _active_decode_count++;
+        _is_decoding = true;
+        _decode_threads.emplace_back(&SigSession::decode_task_proc, this, trace);
     }
 
     void SigSession::remove_decode_task(view::DecodeTrace *trace)
@@ -1944,9 +1939,12 @@ namespace pv
             dex++;
         }
 
-        // Wait the thread end.
-        if (_decode_thread.joinable())
-            _decode_thread.join();
+        // Wait all threads end.
+        for (auto &t : _decode_threads) {
+            if (t.joinable())
+                t.join();
+        }
+        _decode_threads.clear();
     }
 
     view::DecodeTrace *SigSession::get_decoder_trace(int index)
@@ -1974,37 +1972,35 @@ namespace pv
     }
 
     // the decode task thread proc
-    void SigSession::decode_task_proc()
+    void SigSession::decode_task_proc(view::DecodeTrace *task)
     {
         dsv_info("------->decode thread start");
-        auto task = get_top_decode_task();
-
-        while (task != NULL)
+        if (task && !task->_delete_flag)
         {
-            if (!task->_delete_flag)
-            {
-                task->decoder()->begin_decode_work();
-            }
-
-            if (task->_delete_flag)
-            {
-                dsv_info("destroy a decoder in task thread");
-
-                DESTROY_QT_LATER(task);
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                if (!_bClose)
-                {
-                    signals_changed();
-                }
-            }
-
-            task = get_top_decode_task();
+            task->decoder()->begin_decode_work();
         }
 
-        _view_data->get_logic()->decode_end();
+        if (task && task->_delete_flag)
+        {
+            dsv_info("destroy a decoder in task thread");
+            DESTROY_QT_LATER(task);
+        }
 
         dsv_info("------->decode thread end");
-        _is_decoding = false;        
+
+        {
+            std::lock_guard<std::mutex> lock(_decode_task_mutex);
+            _active_decode_count--;
+        }
+        if (_active_decode_count == 0) {
+            for (auto &t : _decode_threads) {
+                if (t.joinable())
+                    t.detach();
+            }
+            _decode_threads.clear();
+            _is_decoding = false;
+            _view_data->get_logic()->decode_end();
+        }
     }
 
     Snapshot *SigSession::get_signal_snapshot()

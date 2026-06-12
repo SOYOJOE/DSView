@@ -276,19 +276,28 @@ SRD_API int srd_session_send(struct srd_session *sess,
         const uint8_t **inbuf, const uint8_t *inbuf_const, uint64_t inbuflen, char **error)
 {
 	GSList *d;
-	int ret;
+	int ret, first_err;
 
 	if (!sess)
 		return SRD_ERR_ARG;
 
-	//foreach srd_decoder_inst* stack
+	/* Phase 1: signal all decoder workers to start processing */
+	first_err = SRD_OK;
 	for (d = sess->di_list; d; d = d->next) {
-		if ((ret = srd_inst_decode(d->data, abs_start_samplenum,
-                abs_end_samplenum, inbuf, inbuf_const, inbuflen, error)) != SRD_OK)
-			return ret;
+		ret = srd_inst_signal_decode(d->data, abs_start_samplenum,
+                abs_end_samplenum, inbuf, inbuf_const, inbuflen, error);
+		if (ret != SRD_OK && first_err == SRD_OK)
+			first_err = ret;
 	}
 
-	return SRD_OK;
+	/* Phase 2: wait for all workers to finish (parallel C-level processing) */
+	for (d = sess->di_list; d; d = d->next) {
+		ret = srd_inst_wait_decode(d->data, error);
+		if (ret != SRD_OK && first_err == SRD_OK)
+			first_err = ret;
+	}
+
+	return first_err;
 }
 
 /**

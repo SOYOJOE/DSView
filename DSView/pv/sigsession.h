@@ -482,7 +482,7 @@ private:
         clear_all_decode_task(run_dex);
     }
    
-    void decode_task_proc();
+    void decode_task_proc(view::DecodeTrace *task);
     view::DecodeTrace* get_top_decode_task();    
 
     void capture_init(); 
@@ -554,8 +554,11 @@ private:
     mutable std::mutex      _sampling_mutex;
     mutable std::mutex      _data_mutex;
     mutable std::mutex      _decode_task_mutex;  
-    std::thread             _decode_thread;
+
+    std::vector<std::thread> _decode_threads;
+
     volatile bool           _is_decoding;
+    int                     _active_decode_count;
  
 	std::vector<view::Signal*>      _signals; 
     std::vector<view::DecodeTrace*> _decode_traces;

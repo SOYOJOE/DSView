@@ -75,7 +75,7 @@ private:
 	static const double DecodeThreshold;
 	static const int64_t DecodeChunkLength;
 	static const unsigned int DecodeNotifyPeriod;
-    static const uint64_t MaxChunkSize = 1024 * 16;
+    static const uint64_t MaxChunkSize = 1024 * 256;
 
 public:
     enum decode_state {
