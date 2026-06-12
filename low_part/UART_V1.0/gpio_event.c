@@ -1,48 +1,184 @@
 /*
- * gpio_event.c — MCU-side UART_VCD Event Protocol v2 encoder
+ * gpio_event.c — UART_VCD Event Protocol v2 encoder + TX ring buffer + UART ISR
  *
- * Wire protocol:
- *   [uint24_le delta_ticks] [data_block...]
+ * Wire protocol:  [uint24_le delta_ticks][1B header][payload...]
+ * TX path:        ping-pong DMA ring buffer (4KB × 2)
+ * Clock:          24MHz systimer ticks
  *
- * delta_ticks: 3-byte LE, raw 24MHz systimer tick count since last event
- * data_block:  1-byte header + payload, 4-byte aligned
- *
- * Header byte:
- *   bit7:     mode (0=GPIO, 1=string)
- *   bits6-5:  sub-mode (GPIO: low/high/toggle, String: hex/ascii)
- *   bits4-0:  param (GPIO: channel 0-23, String: label_len 0-31)
- *
- * TX path: all output goes through the ring buffer (uart_tx_write_byte),
- *          DMA sends data in bulk.
- *
- * All timing uses raw 24MHz systimer ticks (stimer_get_tick).
+ * All hot-path functions are static inline for zero call overhead.
+ * Public API functions are non-static, declared in gpio_event.h.
+ * LTO (-flto) will inline them into app_dma.c callers.
  */
-
 #include "gpio_event.h"
+#include <string.h>
 
-extern void uart_tx_write_byte(unsigned char byte);
-extern void uart_tx_write_buf(const unsigned char *data, unsigned int len);
-extern void uart_tx_write_fast4(const uint8_t data[4]);
-extern uint8_t *uart_tx_reserve(unsigned int n);
-extern void uart_tx_try_send(void);
+/* ═══════════════════════════════════════════════════════════════════════════
+ * CONFIGURATION
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
+#define UART0_MODULE 0
+#define UART_MODULE_SEL UART0_MODULE
 
-/* ─── Internal State ─── */
+#define UART_DMA_CHANNEL_RX  DMA2
+#define UART_DMA_CHANNEL_TX  DMA3
 
-static uint32_t  g_gpio_state = 0;
-static uint32_t  g_last_tick = 0;      /* raw 24MHz systimer tick */
-static int       g_initialized = 0;
+#define TX_BUF_SIZE (4096)  /* power of 2, multiple of 4 */
 
-/* ─── GPIO sub-mode ─── */
-#define GPIO_LOW    0x00   /* bits6-5: 00 */
-#define GPIO_HIGH   0x20   /* bits6-5: 01 */
-#define GPIO_TOGGLE 0x40   /* bits6-5: 10 */
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SHARED STATE
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ─── String sub-mode ─── */
-#define STRING_HEX   0x20   /* bits6-5: 01 (mode=1, sub=00/01) */
-#define STRING_ASCII 0x60   /* bits6-5: 11 (mode=1, sub=10/11) */
+static unsigned char tx_buf[2][TX_BUF_SIZE] __attribute__((aligned(4)));
+static volatile int  tx_wr_idx   = 0;
+static volatile int  tx_wr_pos   = 0;
+static volatile int  tx_dma_busy = 0;
 
-/* ─── Core inline: sample tick, compute delta, write 4B delta+header ─── */
+static uint32_t g_gpio_state  = 0;
+static uint32_t g_last_tick   = 0;
+static int      g_initialized = 0;
+
+static unsigned int tx_last_us_tick = 0;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * PROTOCOL CONSTANTS
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define GPIO_LOW    0x00
+#define GPIO_HIGH   0x20
+#define GPIO_TOGGLE 0x40
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ===  SECTION 1 — TX RING BUFFER (bottom of call chain, defined first) ====
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static inline int tx_flush_one(void)
+{
+    int len = tx_wr_pos;
+    if (len == 0) return 0;
+    uart_send_dma(UART_MODULE_SEL, tx_buf[tx_wr_idx], len);
+    tx_dma_busy = 1;
+    tx_wr_idx  ^= 1;
+    tx_wr_pos   = 0;
+    return 1;
+}
+
+static inline void uart_tx_write_byte(unsigned char byte)
+{
+    if (tx_wr_pos >= TX_BUF_SIZE) {
+        if (tx_dma_busy) return;
+        tx_flush_one();
+    }
+    tx_buf[tx_wr_idx][tx_wr_pos++] = byte;
+}
+
+static inline void uart_tx_write_fast4(const uint8_t data[4])
+{
+    if (tx_wr_pos + 4 > TX_BUF_SIZE) {
+        if (tx_dma_busy) return;
+        tx_flush_one();
+        if (tx_wr_pos + 4 > TX_BUF_SIZE) return;
+    }
+    *(uint32_t *)(tx_buf[tx_wr_idx] + tx_wr_pos) = *(const uint32_t *)data;
+    tx_wr_pos += 4;
+}
+
+static inline uint8_t *uart_tx_reserve(unsigned int n)
+{
+    if (tx_dma_busy) return NULL;
+    if (tx_wr_pos + n > TX_BUF_SIZE) {
+        tx_flush_one();
+        if (tx_dma_busy || tx_wr_pos + n > TX_BUF_SIZE) return NULL;
+    }
+    uint8_t *p = tx_buf[tx_wr_idx] + tx_wr_pos;
+    tx_wr_pos += n;
+    return p;
+}
+
+static inline void uart_tx_try_send(void)
+{
+    if (tx_dma_busy) return;
+    if (tx_wr_pos == 0) return;
+    tx_flush_one();
+}
+
+static inline unsigned int uart_tx_ring_used(void)
+{
+    return tx_wr_pos + (tx_dma_busy ? TX_BUF_SIZE : 0);
+}
+
+static void uart_tx_write_buf(const unsigned char *data, unsigned int len)
+{
+    unsigned int room, words, i;
+    uint32_t *dst;
+    const uint32_t *src;
+
+    while (len > 0) {
+        room = TX_BUF_SIZE - tx_wr_pos;
+        if (room >= len) {
+            dst   = (uint32_t *)&tx_buf[tx_wr_idx][tx_wr_pos];
+            src   = (const uint32_t *)data;
+            words = len >> 2;
+            for (i = 0; i < words; i++) dst[i] = src[i];
+            for (i = words << 2; i < len; i++)
+                tx_buf[tx_wr_idx][tx_wr_pos + i] = data[i];
+            tx_wr_pos += len;
+            return;
+        }
+        if (room > 0) {
+            dst   = (uint32_t *)&tx_buf[tx_wr_idx][tx_wr_pos];
+            src   = (const uint32_t *)data;
+            words = room >> 2;
+            for (i = 0; i < words; i++) dst[i] = src[i];
+            for (i = words << 2; i < room; i++)
+                tx_buf[tx_wr_idx][tx_wr_pos + i] = data[i];
+            tx_wr_pos += room;
+            data += room;
+            len  -= room;
+        }
+        if (tx_dma_busy) return;
+        tx_flush_one();
+    }
+}
+
+void uart_tx_poll(void)
+{
+    unsigned int now_tick, now_us;
+
+    if (tx_dma_busy) return;
+    if (tx_wr_pos == 0) return;
+
+    now_tick = stimer_get_tick();
+    now_us   = now_tick / SYSTEM_TIMER_TICK_1US;
+
+    if (now_us != tx_last_us_tick || uart_tx_ring_used() >= (TX_BUF_SIZE / 2)) {
+        tx_last_us_tick = now_us;
+        tx_flush_one();
+    }
+}
+
+static void uart_tx_flush(void)
+{
+    while (tx_wr_pos > 0 || tx_dma_busy) {
+        if (!tx_dma_busy && tx_wr_pos > 0)
+            tx_flush_one();
+    }
+}
+
+/* ─── Trivial user wrappers ─── */
+
+void user_uart_send_byte(uint8_t byte)
+{
+    uart_tx_write_byte(byte);
+}
+
+void user_uart_flush(void)
+{
+    uart_tx_flush();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ===  SECTION 2 — GPIO EVENT PROTOCOL ENCODER =============================
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 static inline void __attribute__((always_inline))
 gpio_event_emit(uint32_t new_state, uint8_t sub_mode, int channel)
@@ -60,22 +196,6 @@ gpio_event_emit(uint32_t new_state, uint8_t sub_mode, int channel)
 
     dword = delta | ((uint32_t)(sub_mode | (uint8_t)channel) << 24);
     uart_tx_write_fast4((const uint8_t *)&dword);
-}
-
-
-void gpio_event_init(void)
-{
-    g_gpio_state   = 0;
-    g_last_tick    = stimer_get_tick();
-    g_initialized  = 1;
-}
-
-void gpio_event_reset_timer(void)
-{
-    if (!g_initialized) return;
-    user_critical_enter();
-    g_last_tick = stimer_get_tick();
-    user_critical_exit();
 }
 
 void gpio_event_high(int channel)
@@ -108,7 +228,20 @@ void gpio_event_write(uint32_t mask, uint32_t value)
     gpio_event_emit((g_gpio_state & ~mask) | value, GPIO_TOGGLE, 0);
 }
 
-/* ─── String event: header + payload, 4-byte aligned ─── */
+void gpio_event_init(void)
+{
+    g_gpio_state   = 0;
+    g_last_tick    = stimer_get_tick();
+    g_initialized  = 1;
+}
+
+void gpio_event_reset_timer(void)
+{
+    if (!g_initialized) return;
+    user_critical_enter();
+    g_last_tick = stimer_get_tick();
+    user_critical_exit();
+}
 
 void gpio_event_send_string(int channel, int render_mode,
                             const uint8_t *label, int label_len,
@@ -186,9 +319,30 @@ void gpio_event_send_string(int channel, int render_mode,
     }
 }
 
-/* ─── DMA flush ─── */
-
 void gpio_event_tx(void)
 {
     uart_tx_try_send();
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ===  SECTION 3 — UART ISR ================================================
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+_attribute_ram_code_sec_ void uart0_irq_handler(void)
+{
+    if (uart_get_irq_status(UART_MODULE_SEL, UART_TXDONE_IRQ_STATUS))
+    {
+        uart_clr_irq_status(UART_MODULE_SEL, UART_TXDONE_IRQ_STATUS);
+        tx_dma_busy = 0;
+        uart_tx_try_send();
+    }
+
+    if (uart_get_irq_status(UART_MODULE_SEL, UART_RXDONE_IRQ_STATUS))
+    {
+        if ((uart_get_irq_status(UART_MODULE_SEL, UART_RX_ERR))) {
+            uart_clr_irq_status(UART_MODULE_SEL, UART_RXBUF_IRQ_STATUS);
+        }
+        uart_clr_irq_status(UART_MODULE_SEL, UART_RXDONE_IRQ_STATUS);
+    }
+}
+PLIC_ISR_REGISTER(uart0_irq_handler, IRQ_UART0)
