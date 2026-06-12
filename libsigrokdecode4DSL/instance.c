@@ -1205,19 +1205,6 @@ SRD_PRIV int srd_inst_decode(struct srd_decoder_inst *di,
         const uint8_t **inbuf, const uint8_t *inbuf_const, uint64_t inbuflen,
         char **error)
 {
-    int ret;
-    ret = srd_inst_signal_decode(di, abs_start_samplenum, abs_end_samplenum,
-                                  inbuf, inbuf_const, inbuflen, error);
-    if (ret != SRD_OK)
-        return ret;
-    return srd_inst_wait_decode(di, error);
-}
-
-SRD_PRIV int srd_inst_signal_decode(struct srd_decoder_inst *di,
-		uint64_t abs_start_samplenum, uint64_t abs_end_samplenum,
-        const uint8_t **inbuf, const uint8_t *inbuf_const, uint64_t inbuflen,
-        char **error)
-{
 	/* Return an error upon unusable input. */
 	if (!di) {
         *error = g_strdup("empty decoder instance");
@@ -1249,6 +1236,10 @@ SRD_PRIV int srd_inst_signal_decode(struct srd_decoder_inst *di,
         abs_start_samplenum, abs_end_samplenum,
         abs_end_samplenum - abs_start_samplenum, inbuflen, di->inst_id);
 
+	/* 
+		If this is the first call, start the worker thread. 
+		One session may be have more decoder,so more thread will be created
+	*/
 	if (!di->thread_handle) {
 		srd_dbg("No worker thread for this decoder stack "
 			"exists yet, creating one: %s.", di->inst_id);
@@ -1271,27 +1262,20 @@ SRD_PRIV int srd_inst_signal_decode(struct srd_decoder_inst *di,
 	g_cond_signal(&di->got_new_samples_cond);
 	g_mutex_unlock(&di->data_mutex);
 
-    return SRD_OK;
-}
-
-SRD_PRIV int srd_inst_wait_decode(struct srd_decoder_inst *di, char **error)
-{
-	if (!di)
-		return SRD_ERR_ARG;
-
 	/* When all samples in this chunk were handled, return. */
 	g_mutex_lock(&di->data_mutex);
 	while (!di->handled_all_samples && !di->want_wait_terminate)
 		g_cond_wait(&di->handled_all_samples_cond, &di->data_mutex);
 	g_mutex_unlock(&di->data_mutex);
 
-	/* the python got error */
+
+	//the python got error
 	if (di->python_proc_error)
 	{
 		*error = di->python_proc_error;
 		di->python_proc_error = NULL;
 		return SRD_ERR_TERM_REQ;
-	}
+	}				
 
 	return SRD_OK;
 }
