@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <assert.h>
@@ -237,22 +238,32 @@ static int tcp_connect(const char *host, int port)
     if (!he) { sr_err("TCP resolve: %s", host); close(fd); return -1; }
     memset(&addr,0,sizeof(addr)); addr.sin_family=AF_INET;
     addr.sin_port=htons(port); memcpy(&addr.sin_addr,he->h_addr,he->h_length);
-    if (connect(fd,(struct sockaddr*)&addr,sizeof(addr))<0)
-        { sr_err("TCP connect %s:%d: %s",host,port,strerror(errno)); close(fd); return -1; }
+
+    { int fl=fcntl(fd,F_GETFL,0); fcntl(fd,F_SETFL,fl|O_NONBLOCK); }
+    if (connect(fd,(struct sockaddr*)&addr,sizeof(addr))<0) {
+        if (errno!=EINPROGRESS) {
+            sr_err("TCP connect %s:%d: %s",host,port,strerror(errno)); close(fd); return -1;
+        }
+        struct timeval tv; tv.tv_sec=1; tv.tv_usec=0;
+        fd_set wset; FD_ZERO(&wset); FD_SET(fd,&wset);
+        int ret=select(fd+1,NULL,&wset,NULL,&tv);
+        if (ret<=0) {
+            sr_err("TCP connect %s:%d timeout",host,port); close(fd); return -1;
+        }
+        int err=0; socklen_t len=sizeof(err);
+        getsockopt(fd,SOL_SOCKET,SO_ERROR,&err,&len);
+        if (err) { sr_err("TCP connect %s:%d: %s",host,port,strerror(err)); close(fd); return -1; }
+    }
+
     sr_info("TCP connected to %s:%d", host, port);
     return fd;
 }
 
 static int tcp_reconnect(struct uart_vcd_context *ctx)
 {
-    int retries=50;
     if (ctx->tcp_fd>=0) { close(ctx->tcp_fd); ctx->tcp_fd=-1; }
-    sr_info("TCP connecting to %s:%d...", UART_VCD_DEFAULT_TCP_HOST, ctx->tcp_port);
-    while (retries-->0) {
-        ctx->tcp_fd=tcp_connect(UART_VCD_DEFAULT_TCP_HOST, ctx->tcp_port);
-        if (ctx->tcp_fd>=0) break;
-        usleep(100000);
-    }
+    sr_info("TCP connecting to %s:%d...", ctx->tcp_host, ctx->tcp_port);
+    ctx->tcp_fd=tcp_connect(ctx->tcp_host, ctx->tcp_port);
     if (ctx->tcp_fd<0) { sr_err("TCP connect failed"); return SR_ERR; }
     { int fl=fcntl(ctx->tcp_fd,F_GETFL,0); fcntl(ctx->tcp_fd,F_SETFL,fl|O_NONBLOCK); }
     { int rcvbuf=524288; setsockopt(ctx->tcp_fd,SOL_SOCKET,SO_RCVBUF,&rcvbuf,sizeof(rcvbuf)); }
@@ -279,6 +290,7 @@ static GSList *hw_scan(GSList *options)
     if (!sdi) { free(ctx); return NULL; }
     sdi->priv=ctx; sdi->driver=di; sdi->dev_type=DEV_TYPE_USB;
     ctx->tcp_fd=-1; ctx->tcp_port=UART_VCD_DEFAULT_TCP_PORT;
+    g_strlcpy(ctx->tcp_host, UART_VCD_DEFAULT_TCP_HOST, sizeof(ctx->tcp_host));
     ctx->protocol=UART_VCD_DEFAULT_PROTOCOL;
     ctx->samplerate=UART_VCD_EVENT_SAMPLERATE_DEFAULT;
     ctx->total_samples=UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES;
@@ -348,6 +360,7 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
     case SR_CONF_INSTANT: *data=g_variant_new_boolean(FALSE); break;
     case SR_CONF_OPERATION_MODE: *data=g_variant_new_int16(LO_OP_STREAM); break;
     case SR_CONF_LOOP_MODE: *data=g_variant_new_boolean(ctx->is_loop); break;
+    case SR_CONF_TCP_HOST: *data=g_variant_new_string(ctx->tcp_host); break;
     case SR_CONF_USB_SPEED: *data=g_variant_new_int32(LIBUSB_SPEED_HIGH); break;
     case SR_CONF_USB30_SUPPORT: *data=g_variant_new_boolean(FALSE); break;
     default: return SR_ERR_NA;
@@ -365,6 +378,9 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
     case SR_CONF_PROBE_EN: (void)ch; break; /* always enabled */
     case SR_CONF_DEVICE_MODE: sdi->mode=g_variant_get_int16(data); break;
     case SR_CONF_LOOP_MODE: ctx->is_loop=g_variant_get_boolean(data); break;
+    case SR_CONF_TCP_HOST:
+        g_strlcpy(ctx->tcp_host, g_variant_get_string(data, NULL), sizeof(ctx->tcp_host));
+        break;
     default: break;
     }
     return SR_OK;

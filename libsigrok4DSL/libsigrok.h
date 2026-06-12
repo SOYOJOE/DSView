@@ -1045,6 +1045,9 @@ enum sr_config_option_id
 
     SR_CONF_DEMO_CHANGE = 30107,
 
+    /** TCP host address for network-connected devices */
+    SR_CONF_TCP_HOST = 30108,
+
 	/*--- Acquisition modes ---------------------------------------------*/
 
 	/**

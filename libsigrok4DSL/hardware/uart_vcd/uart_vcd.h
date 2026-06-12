@@ -29,6 +29,7 @@
 struct uart_vcd_context {
     int        tcp_fd;
     int        tcp_port;
+    char       tcp_host[256];
     uint64_t   samplerate;
     uint64_t   total_samples;
     uint64_t   collected_samples;
@@ -64,7 +65,7 @@ static const char *uart_vcd_probe_names[] = {
     NULL,
 };
 
-static const int32_t uart_vcd_hwoptions[] = { SR_CONF_LOOP_MODE };
-static const int32_t uart_vcd_sessions[]  = { SR_CONF_SAMPLERATE, SR_CONF_LIMIT_SAMPLES };
+static const int32_t uart_vcd_hwoptions[] = { SR_CONF_LOOP_MODE, SR_CONF_TCP_HOST };
+static const int32_t uart_vcd_sessions[]  = { SR_CONF_SAMPLERATE, SR_CONF_LIMIT_SAMPLES, SR_CONF_TCP_HOST };
 
 #endif

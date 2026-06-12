@@ -51,6 +51,8 @@ private:
 
     void bind_bool(const QString &name, const QString label, int key);
 
+    void bind_string(const QString &name, const QString label, int key);
+
     void bind_enum(const QString &name, const QString label, int key, GVariant *const gvar_list,
 		boost::function<QString (GVariant*)> printer = print_gvariant);
 

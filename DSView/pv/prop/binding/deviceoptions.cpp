@@ -29,6 +29,7 @@
 #include "../double.h"
 #include "../enum.h"
 #include "../int.h"
+#include "../string.h"
 #include "../../config/appconfig.h"
 #include "../../log.h"
 #include "../../appcontrol.h"
@@ -130,6 +131,10 @@ DeviceOptions::DeviceOptions()
             bind_bandwidths(name, label, key, gvar_list);
             break;
 
+        case SR_CONF_TCP_HOST:
+            bind_string(name, label, key);
+            break;
+
         default:
             gvar_list = NULL;
 		}
@@ -160,6 +165,14 @@ void DeviceOptions::bind_bool(const QString &name, const QString label, int key)
 	QString text = LangResource::Instance()->get_lang_text(STR_PAGE_DSL, label.toLocal8Bit().data(), label.toLocal8Bit().data());
 	_properties.push_back(
         new Bool(name, text, bind(config_getter, key),
+			bind(config_setter, key, _1)));
+}
+
+void DeviceOptions::bind_string(const QString &name, const QString label, int key)
+{
+	QString text = LangResource::Instance()->get_lang_text(STR_PAGE_DSL, label.toLocal8Bit().data(), label.toLocal8Bit().data());
+	_properties.push_back(
+        new String(name, text, bind(config_getter, key),
 			bind(config_setter, key, _1)));
 }
 
