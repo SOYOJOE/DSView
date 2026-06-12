@@ -75,7 +75,7 @@ void main_loop(void)
     gpio_set_high_level(LED2);
     static uint8_t data[] = {0, 'a', 'l', 'u', 'e'};
     for (int i = 0; i < 8; i++) {
-        int mode = (i < 4) ? 0 : 1;
+        int mode = (i < 4) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
         gpio_event_send_string(i, mode, (uint8_t *)"lable:", 6, data, 5);
     }
     data[0]++;

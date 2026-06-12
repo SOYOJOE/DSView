@@ -28,7 +28,10 @@ extern "C" {
 #endif
 
 /* ─── Configuration ─── */
-
+enum {
+    GPIO_EVENT_RENDER_MODE_HEX = 0,
+    GPIO_EVENT_RENDER_MODE_ASCII = 1,
+};
 #define GPIO_EVENT_SYS_CLOCK_HZ    24000000
 #define GPIO_EVENT_MAX_CHANNELS    32
 #define GPIO_EVENT_GPIO_MAX        23
