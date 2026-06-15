@@ -38,7 +38,7 @@ MCU 的 `gpio_event_toggle()` 在本地状态上转换为 absolute low/high，�
 
 | 文件 | 作用 |
 |---|---|
-| `libsigrok4DSL/hardware/uart_vcd/uart_vcd.c` | TCP、v2 parser、dense sample 展开、UART 波形合成 |
+| `libsigrok4DSL/hardware/uart_vcd/uart_vcd.c` | TCP、v2 parser、event-native UART 边沿调度 |
 | `libsigrok4DSL/hardware/uart_vcd/uart_vcd.h` | 驱动配置和 context |
 | `low_part/UART_V1.0/gpio_event.c` | MCU v2 encoder 和 ping-pong DMA TX |
 | `low_part/UART_V1.0/app_dma.c` | MCU UART/平台初始化和测试主循环 |
@@ -56,15 +56,16 @@ MCU 的 `gpio_event_toggle()` 在本地状态上转换为 absolute low/high，�
 | virtual RX baud | 6,000,000 baud |
 | channel count | 32 |
 | input buffer | 1 MiB |
-| output chunk | 64 samples / 256 bytes |
-| batch output | 256 chunks / 64 KiB |
-| per-callback event limit | 2,048 |
-| per-callback sample limit | 3,145,728 |
+| sparse event | 16 bytes：absolute sample + 32-bit state |
+| event batch | 4,096 records / 64 KiB |
+| per-callback event limit | 65,536 |
 | per-event delta clamp | 12,000,000 |
 
 ## 已知约束
 
-- `LogicSnapshot` 保存 dense 位图，32 通道 24 MHz 时约增长 97.5 MB/s。
+- `LogicSnapshot` 的 UART_VCD backend 仅保存真实边沿，内存与边沿数成正比。
+- decoder 在相邻边沿之间使用 constant channel，不再展开 24 MHz dense 数据。
+- 保存和导出仍会按块临时物化位图，使用后立即释放。
 - DSL RLE 是 FPGA 侧能力，不能直接解决 UART_VCD Snapshot 内存。
 - UART_VCD 当前忽略 channel disable，默认按全部 32 通道存储。
 - 默认 profile 的 sample rate/decoder baud 可能与驱动常量漂移，修改配置时需

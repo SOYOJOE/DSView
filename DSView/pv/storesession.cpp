@@ -322,6 +322,7 @@ void StoreSession::save_logic(pv::data::LogicSnapshot *logic_snapshot)
                 
                 MakeChunkName(chunk_name, i - start_block, ch_index, ch_type, HEADER_FORMAT_VERSION);
                 ret = m_zipDoc.AddFromBuffer(chunk_name, (const char*)buf, size) ? SR_OK : -1;
+                logic_snapshot->clear_materialized_blocks();
 
                 if (ret != SR_OK) {
                     if (!_has_error) {
@@ -1084,6 +1085,8 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
                     free(xbuf);
                 progress_updated();
             }
+
+            logic_snapshot->clear_materialized_blocks();
         }
     }
     else if (channel_type == SR_CHANNEL_DSO) {

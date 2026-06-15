@@ -11,7 +11,7 @@ Telink MCU
   -> low_part/bridge/serial_bridge.py
   -> TCP server :12345
   -> libsigrok4DSL/hardware/uart_vcd/uart_vcd.c
-  -> 24 MHz dense LA_CROSS_DATA
+  -> LA_SPARSE_EVENTS
   -> SigSession
   -> LogicSnapshot
   -> waveform view and protocol decoders
@@ -58,12 +58,12 @@ GPIO 事件固定为 4 bytes：
 - 单次读取缓冲为 64 KiB，累积输入缓冲为 1 MiB。
 - 缓冲区溢出时丢弃旧的未解析数据，保留最新一次读取。
 
-### 3.2 事件展开
+### 3.2 事件调度
 
 `ev2_blow_buf()` 完成一个事件的解析：
 
 1. 读取 24-bit delta。
-2. 先输出 delta 对应的旧状态采样。
+2. 将绝对采样时间推进 delta，但不生成空闲采样。
 3. GPIO 事件再更新 GPIO 状态。
 4. 字符串事件加入对应 RX 通道的 64-byte FIFO。
 
@@ -72,9 +72,48 @@ GPIO 事件固定为 4 bytes：
 | 限制 | 当前值 |
 |---|---:|
 | 单事件最大 delta | 12,000,000 samples |
-| 单回调最大事件数 | 2,048 |
-| 单回调最大展开采样数 | 3,145,728 |
+| 单回调最大事件数 | 65,536 |
 
+event-native backend 不再按虚拟采样数限制单次回调。旧的 3,145,728 sample
+预算会在长 delta 或高通道数测试中造成 socket 积压，现已移除。
+
+多通道频率测试中的 delta 是相邻任意两个全局事件之间的间隔，不是单通道
+周期。24 路方波、每通道 1 kHz 时：
+
+```text
+delta = 24 MHz / (24 channels * 2 edges * 1 kHz) = 500 ticks
+```
+
+可使用：
+
+```bash
+python3 send_event_test.py gpio-frequency \
+  --gpio-channels 24 --gpio-frequency 1000 \
+  --wire-mbps 2.1
+```
+
+GPIO 每通道每秒 toggle 1,000 次，并同时让 RX0-RX7 每毫秒发送与固件一致的
+11-byte string payload（`"lable:"` 6 bytes + data 5 bytes）：
+
+```bash
+python3 send_event_test.py gpio-uart-1k \
+  --payload-mbps 2.1 --duration 10
+```
+
+该场景每毫秒固定产生 256 bytes protocol payload：
+
+```text
+24 GPIO events * 4 bytes + 8 UART events * 20 bytes = 256 bytes/ms
+```
+
+即 2.048 Mbps TCP payload；如果按物理 8N1 串口计算，需要 2.56 Mbaud。
+RX0-RX3 使用 HEX render，最终各生成 16 个虚拟 UART 字符；RX4-RX7 使用
+ASCII render，各生成 11 个虚拟 UART 字符。
+驱动每 0.25 秒逻辑时间输出一次 `activity` 掩码。正常复合测试应为
+`activity=0xffffffff`，否则可直接定位是 GPIO 还是 RX 通道未产生边沿。
+
+输入缓冲溢出时驱动现在报告 `SR_DF_OVERFLOW` 并停止采集，不再丢弃数据后从
+随机字节继续解析，避免协议失帧被误显示为异常通道和超大 delta。
 ### 3.3 RX0-RX7 UART 合成
 
 每个字符生成标准 8N1 波形：
@@ -95,22 +134,26 @@ UART_VCD_UART_BAUD_RATE = 24 MHz / 4 = 6 Mbaud
 HEX 模式将一个 data byte 转成两个大写 ASCII hex 字符；ASCII 模式直接
 发送 data byte。label 始终作为 ASCII 字节发送。
 
-### 3.4 LA_CROSS_DATA 输出
+### 3.4 LA_SPARSE_EVENTS 输出
 
-驱动将事件展开为 DSView 现有逻辑数据格式：
+驱动向 Session 提交事件记录：
 
 ```text
-64 samples x 32 channels = 256 bytes
+struct sr_logic_sparse_event {
+    uint64_t sample;   // absolute 24 MHz sample index
+    uint32_t state;    // D0-D23 + RX0-RX7
+    uint32_t reserved;
+}
 ```
 
-每个通道占连续 8 bytes，每个 bit 是一个采样点，LSB 表示较早采样。
-最多批量聚合 256 个 chunk，即 65,536 bytes，再通过 `ds_data_forward()`
-发送 `SR_DF_LOGIC`。
+只有状态变化和批次末尾时间点会产生记录。最多聚合 4,096 条记录，
+再通过 `ds_data_forward()` 发送 `SR_DF_LOGIC`。
 
 ## 4. LogicSnapshot 存储
 
-`LogicSnapshot` 只接受 dense `LA_CROSS_DATA`。每个通道分别保存完整位图，
-并生成三级 mipmap 供波形边沿查询。
+`LogicSnapshot` 同时保留 DSLogic dense backend 和 UART_VCD sparse backend。
+UART_VCD 每通道保存 `(sample, level)` 边沿数组，单点和前后边沿查询使用
+二分查找。
 
 关键参数：
 
@@ -127,7 +170,7 @@ LeafBlockSpace 包括原始位图和 mipmap：
 (64 + 64^2 + 64^3 + 64^4) / 8 = 2,130,440 bytes
 ```
 
-## 5. 内存增长原因
+## 5. 内存模型
 
 32 通道、24 MHz 的原始位图速率：
 
@@ -147,13 +190,19 @@ mipmap 的额外比例：
 96,000,000 * 1.015873 = 97,523,804 bytes/s
 ```
 
-这就是每秒接近 100 MB 的主要来源。驱动自身长期缓冲约为：
+这是旧 dense backend 每秒接近 100 MB 的原因。当前 UART_VCD 不再分配这部分
+长期位图。每个 `SparseEdge` 当前通常占 16 bytes，因此近似为：
+
+```text
+memory ~= edge_count * 16 bytes + vector capacity
+```
+
+驱动自身长期缓冲约为：
 
 | 缓冲 | 大小 |
 |---|---:|
 | input_buf | 1 MiB |
-| output_buf | 256 bytes |
-| batch_buf | 64 KiB |
+| event_buf | 64 KiB |
 | TCP receive buffer | 512 KiB（内核） |
 
 因此缩小 `uart_vcd.c` 的 batch 或 input buffer 不能显著降低总内存。
@@ -168,7 +217,7 @@ DSL 的 `SR_CONF_RLE` 是硬件/FPGA 采集能力。`dsl_start_transfers()` 将 
 在调用 `ds_data_forward()` 前展开成 `LA_CROSS_DATA`，Snapshot 内存仍然约
 97.5 MB/s。
 
-## 7. 可行优化
+## 7. 当前实现和后续优化
 
 ### 7.1 启用真实的通道开关
 
@@ -195,7 +244,7 @@ UART_VCD 当前对 `SR_CONF_PROBE_EN` 总是返回 true，并忽略 set。Snapsh
 
 此方案不降低每秒写入带宽，但适合实时观察。
 
-### 7.3 Event-native sparse snapshot
+### 7.3 Event-native sparse snapshot（已实现）
 
 protocol v2 本身已经是压缩事件流。最有效方案是让上层直接保存：
 
@@ -207,14 +256,16 @@ RX:   (sample_index, byte stream/render mode)
 波形绘制可直接从边沿列表生成，内存取决于事件数量而不是采样率。对于长空闲
 GPIO，压缩比可达到数千倍。
 
-主要改动点：
+当前已经完成：
 
-- 扩展 `sr_datafeed_logic` 或增加新的 event packet 类型。
-- 新增 sparse snapshot，或为 `LogicSnapshot` 增加 event backend。
-- 实现 `get_sample()`、边沿查询、循环窗口和保存功能。
-- 协议解码器需要按需将指定时间窗口展开成 dense sample block。
+- `LA_SPARSE_EVENTS` 和 `sr_logic_sparse_event`。
+- `LogicSnapshot` sparse backend、边沿查询和循环窗口。
+- 保存/导出按块临时物化。
+- decoder 按下一个真实边沿分块；无边沿区间传 constant channel，由
+  libsigrokdecode 直接跳过。
 
-这是推荐的长期方案，但涉及 Session、Snapshot、decoder 和文件保存边界。
+因此采集和解码 CPU 应主要取决于 TCP 事件率及真实边沿率，而不再取决于
+24 MHz 虚拟采样率。
 
 ### 7.4 Leaf block 常量状态压缩
 
@@ -228,8 +279,8 @@ GPIO，压缩比可达到数千倍。
 
 ## 8. 推荐顺序
 
-1. 支持真实 channel enable，降低未使用通道成本。
-2. 为实时模式设置明确的 ring window，阻止无限增长。
-3. 实现 event-native sparse snapshot，并为 decoder 按需展开。
-4. 不建议单独照搬 DSL 的 `SR_CONF_RLE`，因为当前 Session/Snapshot 接口
-   最终仍要求 dense sample data。
+1. 对 0.2/2/3 Mbps TCP 输入分别实测 CPU、事件积压和停止延迟。
+2. 优化 loop mode 的边沿淘汰，避免频繁 `vector::erase()`。
+3. 评估真实 channel enable，减少无关 UI 和 decoder 工作。
+4. 不建议单独照搬 DSL 的 `SR_CONF_RLE`，因为 DSLogic 路径最终仍要求
+   dense sample data。

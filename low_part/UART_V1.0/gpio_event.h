@@ -45,8 +45,8 @@ enum {
 /* ─── Required platform callbacks ─── */
 
 extern uint32_t user_timer_ticks(void);
-extern void user_critical_enter(void);
-extern void user_critical_exit(void);
+extern uint32_t user_critical_enter(void);
+extern void user_critical_exit(uint32_t state);
 
 /* ─── Entry points ─── */
 

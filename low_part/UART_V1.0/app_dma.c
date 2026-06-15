@@ -14,8 +14,15 @@ volatile unsigned int rev_data_len = 0;
 
 /* ─── User callback stubs (override for critical section protection) ─── */
 
-void user_critical_enter(void) {}
-void user_critical_exit(void) {}
+uint32_t user_critical_enter(void)
+{
+    return core_interrupt_disable();
+}
+
+void user_critical_exit(uint32_t state)
+{
+    core_restore_interrupt(state);
+}
 
 uint32_t user_timer_ticks(void)
 {

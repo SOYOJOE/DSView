@@ -378,6 +378,13 @@ struct sr_datafeed_meta {
 enum LA_DATA_FORMAT {
     LA_CROSS_DATA,
     LA_SPLIT_DATA,
+    LA_SPARSE_EVENTS,
+};
+
+struct sr_logic_sparse_event {
+    uint64_t sample;
+    uint32_t state;
+    uint32_t reserved;
 };
 
 struct sr_datafeed_logic {

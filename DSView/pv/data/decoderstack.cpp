@@ -584,6 +584,8 @@ void DecoderStack::decode_data(const uint64_t decode_start, const uint64_t decod
         }
 
         uint64_t chunk_end = end_index;
+        if (!_snapshot->is_sparse() && chunk_end - i > MaxChunkSize)
+            chunk_end = i + MaxChunkSize;
 
         for (int j =0 ; j < logic_di->dec_num_channels; j++) {
             int sig_index = logic_di->dec_channelmap[j];
@@ -618,8 +620,6 @@ void DecoderStack::decode_data(const uint64_t decode_start, const uint64_t decod
 
         if (chunk_end > end_index)
             chunk_end = end_index;
-        if (chunk_end - i > MaxChunkSize)
-            chunk_end = i + MaxChunkSize;
 
         bEndTime = (chunk_end == end_index);
 

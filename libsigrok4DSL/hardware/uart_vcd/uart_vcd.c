@@ -23,128 +23,191 @@
 #undef LOG_PREFIX
 #define LOG_PREFIX "uart_vcd: "
 
-#define UART_VCD_SAMPLES_PER_OUTPUT     64
-#define UART_VCD_OUTPUT_SIZE            (UART_VCD_NUM_PROBES * 8)
-#define UART_VCD_BATCH_CHUNKS           256
-#define UART_VCD_BATCH_OUTPUT_SIZE      (UART_VCD_OUTPUT_SIZE * UART_VCD_BATCH_CHUNKS)
 #define UART_VCD_READ_BUF_SIZE          65536
-#define UART_VCD_EVENT_LIMIT            2048
-#define UART_VCD_SAMPLE_LIMIT           3145728
+#define UART_VCD_EVENT_LIMIT            65536
 #define UART_VCD_DELTA_CLAMP            12000000
 
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
 static struct sr_dev_driver *di = &uart_vcd_driver_info;
 
-/* ─── UART TX sim ─── */
-static uint32_t uart_tx_process(struct uart_vcd_context *ctx, uint32_t state)
+static void flush_event_batch(struct uart_vcd_context *ctx,
+                              const struct sr_dev_inst *sdi);
+
+static void record_state(struct uart_vcd_context *ctx,
+                         const struct sr_dev_inst *sdi)
 {
-    int ch;
-    if (!ctx->uart_tx_active) return state;
-    for (ch = 0; ch < 8; ch++) {
-        if (ctx->uart_tx_bit[ch] >= 0) {
-            uint32_t ch_bit = 1u << (24 + ch);
-            if (ctx->uart_tx_bit[ch] == 0) state &= ~ch_bit;
-            else if (ctx->uart_tx_bit[ch] >= 9) state |= ch_bit;
-            else if (ctx->uart_tx_data[ch] & (1u<<(ctx->uart_tx_bit[ch]-1))) state |= ch_bit;
-            else state &= ~ch_bit;
-            if (--ctx->uart_tx_samp_left[ch] <= 0) {
-                ctx->uart_tx_bit[ch]++;
-                if (ctx->uart_tx_bit[ch] >= 10) {
-                    ctx->uart_tx_bit[ch] = -1;
-                    ctx->uart_tx_active--;
-                    if (ctx->uart_fifo_head[ch] != ctx->uart_fifo_tail[ch]) {
-                        ctx->uart_tx_data[ch] = ctx->uart_fifo[ch][ctx->uart_fifo_tail[ch]];
-                        ctx->uart_fifo_tail[ch] = (ctx->uart_fifo_tail[ch]+1)&0x3F;
-                        ctx->uart_tx_bit[ch] = 0;
-                        ctx->uart_tx_samp_left[ch] = ctx->uart_tx_samp_per_bit;
-                        ctx->uart_tx_active++;
-                    }
-                } else ctx->uart_tx_samp_left[ch] = ctx->uart_tx_samp_per_bit;
+    struct sr_logic_sparse_event *last;
+    ctx->activity_mask |= ctx->recorded_state ^ ctx->output_state;
+    ctx->recorded_state = ctx->output_state;
+
+    if (ctx->event_count) {
+        last = &ctx->event_buf[ctx->event_count - 1];
+        if (last->sample == ctx->collected_samples) {
+            last->state = ctx->output_state;
+            return;
+        }
+        if (last->state == ctx->output_state)
+            return;
+    }
+
+    if (ctx->event_count >= UART_VCD_EVENT_BATCH_SIZE - 1)
+        flush_event_batch(ctx, sdi);
+
+    ctx->event_buf[ctx->event_count].sample = ctx->collected_samples;
+    ctx->event_buf[ctx->event_count].state = ctx->output_state;
+    ctx->event_buf[ctx->event_count].reserved = 0;
+    ctx->event_count++;
+}
+
+static void flush_event_batch(struct uart_vcd_context *ctx,
+                              const struct sr_dev_inst *sdi)
+{
+    struct sr_datafeed_packet pkt;
+    struct sr_datafeed_logic log;
+    struct sr_logic_sparse_event *last;
+
+    if (!ctx->event_count ||
+        ctx->event_buf[ctx->event_count - 1].sample != ctx->collected_samples) {
+        last = &ctx->event_buf[ctx->event_count++];
+        last->sample = ctx->collected_samples;
+        last->state = ctx->output_state;
+        last->reserved = 0;
+    }
+
+    pkt.type = SR_DF_LOGIC;
+    pkt.status = SR_PKT_OK;
+    pkt.payload = &log;
+    log.format = LA_SPARSE_EVENTS;
+    log.index = 0;
+    log.order = 0;
+    log.length = (uint64_t)ctx->event_count * sizeof(*ctx->event_buf);
+    log.unitsize = sizeof(*ctx->event_buf);
+    log.data_error = 0;
+    log.error_pattern = 0;
+    log.data = ctx->event_buf;
+    ds_data_forward(sdi, &pkt);
+    ctx->event_count = 0;
+}
+
+static void uart_set_level(struct uart_vcd_context *ctx, int channel, int high)
+{
+    const uint32_t mask = 1u << (24 + channel);
+    if (high)
+        ctx->output_state |= mask;
+    else
+        ctx->output_state &= ~mask;
+}
+
+static gboolean uart_fifo_push(struct uart_vcd_context *ctx, int channel,
+                               uint8_t value)
+{
+    const uint8_t next = (ctx->uart_fifo_head[channel] + 1) & 0x3F;
+    if (next == ctx->uart_fifo_tail[channel]) {
+        ctx->uart_fifo_overflow = TRUE;
+        return FALSE;
+    }
+
+    ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]] = value;
+    ctx->uart_fifo_head[channel] = next;
+    return TRUE;
+}
+
+static void uart_start_byte(struct uart_vcd_context *ctx, int channel)
+{
+    ctx->uart_tx_data[channel] =
+        ctx->uart_fifo[channel][ctx->uart_fifo_tail[channel]];
+    ctx->uart_fifo_tail[channel] =
+        (ctx->uart_fifo_tail[channel] + 1) & 0x3F;
+    ctx->uart_tx_bit[channel] = 0;
+    ctx->uart_tx_next_sample[channel] =
+        ctx->collected_samples + ctx->uart_tx_samp_per_bit;
+    uart_set_level(ctx, channel, FALSE);
+}
+
+static void uart_advance(struct uart_vcd_context *ctx,
+                         const struct sr_dev_inst *sdi, uint64_t target)
+{
+    while (ctx->uart_tx_active) {
+        uint64_t next = UINT64_MAX;
+        uint32_t old_state;
+        int channel;
+
+        for (channel = 0; channel < 8; channel++) {
+            if (ctx->uart_tx_bit[channel] >= 0 &&
+                ctx->uart_tx_next_sample[channel] < next)
+                next = ctx->uart_tx_next_sample[channel];
+        }
+        if (next > target)
+            break;
+
+        ctx->collected_samples = next;
+        old_state = ctx->output_state;
+
+        for (channel = 0; channel < 8; channel++) {
+            int bit;
+            if (ctx->uart_tx_bit[channel] < 0 ||
+                ctx->uart_tx_next_sample[channel] != next)
+                continue;
+
+            bit = ++ctx->uart_tx_bit[channel];
+            if (bit < 9) {
+                uart_set_level(ctx, channel,
+                    (ctx->uart_tx_data[channel] & (1u << (bit - 1))) != 0);
+                ctx->uart_tx_next_sample[channel] =
+                    next + ctx->uart_tx_samp_per_bit;
+            } else if (bit == 9) {
+                uart_set_level(ctx, channel, TRUE);
+                ctx->uart_tx_next_sample[channel] =
+                    next + ctx->uart_tx_samp_per_bit;
+            } else if (ctx->uart_fifo_head[channel] !=
+                       ctx->uart_fifo_tail[channel]) {
+                uart_start_byte(ctx, channel);
+            } else {
+                ctx->uart_tx_bit[channel] = -1;
+                ctx->uart_tx_next_sample[channel] = UINT64_MAX;
+                ctx->uart_tx_active--;
+                uart_set_level(ctx, channel, TRUE);
             }
         }
+
+        if (ctx->output_state != old_state)
+            record_state(ctx, sdi);
     }
-    return state;
-}
 
-static void flush_batch(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi)
-{
-    if (!ctx->batch_chunk) return;
-    struct sr_datafeed_packet pkt; struct sr_datafeed_logic log;
-    pkt.type=SR_DF_LOGIC; pkt.status=SR_PKT_OK; pkt.payload=&log;
-    log.format=LA_CROSS_DATA; log.index=0; log.order=0;
-    log.length=(uint64_t)ctx->batch_chunk * UART_VCD_OUTPUT_SIZE;
-    log.unitsize=1; log.data_error=0; log.error_pattern=0; log.data=ctx->batch_buf;
-    ds_data_forward(sdi, &pkt);
-    ctx->batch_chunk=0;
-}
-
-static void ev2_push_chunk(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi,
-                            const uint8_t *chunk)
-{
-    memcpy(ctx->batch_buf + ctx->batch_chunk * UART_VCD_OUTPUT_SIZE,
-           chunk, UART_VCD_OUTPUT_SIZE);
-    if (++ctx->batch_chunk == UART_VCD_BATCH_CHUNKS) flush_batch(ctx, sdi);
-}
-
-static void emit_event_sample(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi)
-{
-    uint32_t state = uart_tx_process(ctx, ctx->gpio_state);
-    int byte_idx = ctx->event_sample_pos >> 3;
-    int bit_idx  = ctx->event_sample_pos & 7;
-    int ch;
-    for (ch = 0; ch < UART_VCD_NUM_PROBES; ch++)
-        if (state & (1u<<ch)) ctx->output_buf[(ch<<3)+byte_idx] |= (uint8_t)(1u<<bit_idx);
-    if (++ctx->event_sample_pos == UART_VCD_SAMPLES_PER_OUTPUT) {
-        ev2_push_chunk(ctx, sdi, ctx->output_buf);
-        memset(ctx->output_buf, 0, UART_VCD_OUTPUT_SIZE);
-        ctx->event_sample_pos = 0;
-    }
-}
-
-static void ev2_emit_samples(struct uart_vcd_context *ctx,
-                              const struct sr_dev_inst *sdi, uint64_t count)
-{
-    uint64_t emitted = 0;
-    if (!ctx->uart_tx_active && !ctx->event_sample_pos && count >= UART_VCD_SAMPLES_PER_OUTPUT) {
-        uint8_t chunk[UART_VCD_OUTPUT_SIZE];
-        memset(chunk, 0, UART_VCD_OUTPUT_SIZE);
-        {
-            int ch; uint32_t s = ctx->gpio_state;
-            for (ch = 0; ch < UART_VCD_NUM_PROBES; ch++)
-                if (s & (1u<<ch)) memset(chunk + (ch<<3), 0xFF, 8);
-        }
-        uint64_t n_chunks = count / UART_VCD_SAMPLES_PER_OUTPUT;
-        if (n_chunks > (uint64_t)(UART_VCD_BATCH_CHUNKS - ctx->batch_chunk))
-            n_chunks = UART_VCD_BATCH_CHUNKS - ctx->batch_chunk;
-        {
-            uint64_t i;
-            for (i = 0; i < n_chunks && ctx->collecting; i++)
-                ev2_push_chunk(ctx, sdi, chunk);
-        }
-        emitted = n_chunks * UART_VCD_SAMPLES_PER_OUTPUT;
-        count -= emitted;
-    }
-    {
-        uint64_t i;
-        for (i = 0; i < count && ctx->collecting; i++) emit_event_sample(ctx, sdi);
-    }
-    emitted += count;
-    ctx->collected_samples += emitted;
-}
-
-static void flush_event_output(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi)
-{
-    if (!ctx->event_sample_pos) return;
-    while (ctx->event_sample_pos > 0) emit_event_sample(ctx, sdi);
+    ctx->collected_samples = target;
 }
 
 static void send_event_end(struct uart_vcd_context *ctx, const struct sr_dev_inst *sdi)
 {
-    flush_event_output(ctx, sdi);
-    flush_batch(ctx, sdi);
+    if (ctx->end_sent)
+        return;
+
+    if (ctx->parsed_events || ctx->activity_mask) {
+        sr_info("final parsed=%llu, sample=%llu, activity=0x%08x",
+                (unsigned long long)ctx->parsed_events,
+                (unsigned long long)ctx->collected_samples,
+                ctx->activity_mask);
+    }
+
+    flush_event_batch(ctx, sdi);
     struct sr_datafeed_packet pkt;
     pkt.type=SR_DF_END; pkt.status=SR_PKT_OK;
-    ds_data_forward(sdi, &pkt); ctx->collecting=FALSE;
+    ds_data_forward(sdi, &pkt);
+    ctx->end_sent=TRUE;
+    ctx->collecting=FALSE;
+}
+
+static void protocol_error(struct uart_vcd_context *ctx,
+                           const struct sr_dev_inst *sdi, const char *reason)
+{
+    struct sr_datafeed_packet pkt;
+
+    sr_err("protocol framing error: %s", reason);
+    pkt.type=SR_DF_OVERFLOW;
+    pkt.status=SR_PKT_DATA_ERROR;
+    pkt.payload=NULL;
+    ds_data_forward(sdi,&pkt);
+    send_event_end(ctx, sdi);
 }
 
 /* ─── Protocol v2 parser ─── */
@@ -158,70 +221,96 @@ static int ev2_blow_buf(struct uart_vcd_context *ctx, const struct sr_dev_inst *
     uint64_t delta_samples = delta_raw;
     if (ctx->first_event) { ctx->first_event = FALSE; delta_samples = 1; }
     else if (delta_samples > ctx->total_samples) delta_samples = 1;
-    if (delta_samples > UART_VCD_DELTA_CLAMP) delta_samples = UART_VCD_DELTA_CLAMP;
+    if (delta_samples > UART_VCD_DELTA_CLAMP) {
+        protocol_error(ctx, sdi, "delta exceeds configured maximum");
+        return 4;
+    }
 
     pos=3;
     uint8_t header = p[pos++];
 
     if (header & 0x80) {
         int label_len = header & 0x1F;
-        int render_sub = (header>>5)&3; (void)render_sub;
+        int render_sub = (header>>5)&3;
         if (len < pos+2) return 0;
-        uint8_t ch_byte = p[pos++]; int channel = ch_byte&7;
+        uint8_t ch_byte = p[pos++]; int channel = ch_byte;
         uint8_t total_len = p[pos++]; int data_len = (int)total_len - label_len;
-        if (data_len<0) data_len=0;
+        if (render_sub > 1 || channel > 7 || data_len < 0) {
+            protocol_error(ctx, sdi, "invalid string header");
+            return pos;
+        }
         int payload_onwire = 2+total_len;
         int payload_padded = (payload_onwire+3)&~3;
         if (len < pos+label_len+data_len+(payload_padded-payload_onwire)) return 0;
 
-        ev2_emit_samples(ctx, sdi, delta_samples);
-        ctx->gpio_state |= (1u<<(24+channel));
+        {
+            uint64_t target = ctx->collected_samples + delta_samples;
+            if (!ctx->is_loop && target > ctx->total_samples)
+                target = ctx->total_samples;
+            uart_advance(ctx, sdi, target);
+        }
+        ctx->output_state |= (1u<<(24+channel));
         {
             const uint8_t *src = p+pos; int d;
             for (d=0; d<label_len; d++) {
-                uint8_t nxt = (ctx->uart_fifo_head[channel]+1)&0x3F;
-                if (nxt!=ctx->uart_fifo_tail[channel])
-                    { ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]]=src[d];
-                      ctx->uart_fifo_head[channel]=nxt; }
+                uart_fifo_push(ctx, channel, src[d]);
             }
             src+=label_len;
             for (d=0; d<data_len; d++) {
                 uint8_t b = src[d];
                 if (render_sub==0) {
                     static const char hexc[]="0123456789ABCDEF";
-                    uint8_t h=(uint8_t)hexc[(b>>4)&0xF], l=(uint8_t)hexc[b&0xF], nxt;
-                    nxt=(ctx->uart_fifo_head[channel]+1)&0x3F;
-                    if (nxt!=ctx->uart_fifo_tail[channel])
-                        {ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]]=h;
-                         ctx->uart_fifo_head[channel]=nxt;}
-                    nxt=(ctx->uart_fifo_head[channel]+1)&0x3F;
-                    if (nxt!=ctx->uart_fifo_tail[channel])
-                        {ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]]=l;
-                         ctx->uart_fifo_head[channel]=nxt;}
+                    uint8_t h=(uint8_t)hexc[(b>>4)&0xF], l=(uint8_t)hexc[b&0xF];
+                    uart_fifo_push(ctx, channel, h);
+                    uart_fifo_push(ctx, channel, l);
                 } else {
-                    uint8_t nxt=(ctx->uart_fifo_head[channel]+1)&0x3F;
-                    if (nxt!=ctx->uart_fifo_tail[channel])
-                        {ctx->uart_fifo[channel][ctx->uart_fifo_head[channel]]=b;
-                         ctx->uart_fifo_head[channel]=nxt;}
+                    uart_fifo_push(ctx, channel, b);
                 }
             }
         }
         pos+=label_len+data_len;
         pos+=payload_padded-payload_onwire;
         if (ctx->uart_tx_bit[channel]<0 && ctx->uart_fifo_head[channel]!=ctx->uart_fifo_tail[channel])
-            { ctx->uart_tx_data[channel]=ctx->uart_fifo[channel][ctx->uart_fifo_tail[channel]];
-              ctx->uart_fifo_tail[channel]=(ctx->uart_fifo_tail[channel]+1)&0x3F;
-              ctx->uart_tx_bit[channel]=0; ctx->uart_tx_samp_left[channel]=ctx->uart_tx_samp_per_bit;
-              ctx->uart_tx_active++; }
+            { uart_start_byte(ctx, channel); ctx->uart_tx_active++; }
+        record_state(ctx, sdi);
+        if (ctx->uart_fifo_overflow) {
+            struct sr_datafeed_packet pkt;
+            sr_err("RX%d UART FIFO overflow", channel);
+            pkt.type=SR_DF_OVERFLOW;
+            pkt.status=SR_PKT_DATA_ERROR;
+            pkt.payload=NULL;
+            ds_data_forward(sdi,&pkt);
+            send_event_end(ctx, sdi);
+        }
     } else {
         uint8_t sub = (header>>5)&3; int channel = header&0x1F;
-        ev2_emit_samples(ctx, sdi, delta_samples);
+        {
+            uint64_t target = ctx->collected_samples + delta_samples;
+            if (!ctx->is_loop && target > ctx->total_samples)
+                target = ctx->total_samples;
+            uart_advance(ctx, sdi, target);
+        }
         if (channel<=23) {
             uint32_t mask = 1u<<channel;
             if (sub==0) ctx->gpio_state &= ~mask;
             else if (sub==1) ctx->gpio_state |= mask;
             else ctx->gpio_state ^= mask;
+            ctx->output_state =
+                (ctx->output_state & 0xff000000u) | ctx->gpio_state;
+            record_state(ctx, sdi);
         }
+    }
+
+    ctx->parsed_events++;
+    if (ctx->collected_samples - ctx->activity_report_sample >=
+        ctx->samplerate / 4) {
+        sr_info("parsed=%llu, sample=%llu, activity=0x%08x",
+                (unsigned long long)ctx->parsed_events,
+                (unsigned long long)ctx->collected_samples,
+                ctx->activity_mask);
+        ctx->parsed_events = 0;
+        ctx->activity_mask = 0;
+        ctx->activity_report_sample = ctx->collected_samples;
     }
 
     if (!ctx->is_loop && ctx->collected_samples >= ctx->total_samples)
@@ -328,8 +417,10 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
     if (sdi && sdi->priv) {
         ctx=sdi->priv;
         if (ctx->tcp_fd>=0) { close(ctx->tcp_fd); ctx->tcp_fd=-1; }
-        free(ctx->input_buf); free(ctx->output_buf); free(ctx->batch_buf);
-        ctx->input_buf=ctx->output_buf=ctx->batch_buf=NULL;
+        free(ctx->input_buf);
+        free(ctx->event_buf);
+        ctx->input_buf = NULL;
+        ctx->event_buf = NULL;
         sdi->status=SR_ST_INACTIVE; return SR_OK;
     }
     return SR_ERR_CALL_STATUS;
@@ -417,26 +508,40 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
 {
     (void)cb_data; struct uart_vcd_context *ctx; assert(sdi->priv); ctx=sdi->priv;
 
-    ctx->collected_samples=0; ctx->collecting=TRUE;
-    ctx->event_sample_pos=0; ctx->gpio_state=0; ctx->input_len=0; ctx->input_offset=0; ctx->batch_chunk=0;
+    ctx->collected_samples=0; ctx->collecting=TRUE; ctx->end_sent=FALSE;
+    ctx->uart_fifo_overflow=FALSE;
+    ctx->recorded_state=0xff000000u; ctx->activity_mask=0;
+    ctx->activity_report_sample=0; ctx->parsed_events=0;
+    ctx->gpio_state=0; ctx->output_state=0xff000000u;
+    ctx->input_len=0; ctx->input_offset=0; ctx->event_count=0;
 
     ctx->uart_tx_samp_per_bit=(int)(ctx->samplerate/UART_VCD_UART_BAUD_RATE);
     memset(ctx->uart_tx_data,0,sizeof(ctx->uart_tx_data));
     memset(ctx->uart_tx_bit,-1,sizeof(ctx->uart_tx_bit));
-    memset(ctx->uart_tx_samp_left,0,sizeof(ctx->uart_tx_samp_left));
+    {
+        int channel;
+        for (channel = 0; channel < 8; channel++)
+            ctx->uart_tx_next_sample[channel] = UINT64_MAX;
+    }
     memset(ctx->uart_fifo_head,0,sizeof(ctx->uart_fifo_head));
     memset(ctx->uart_fifo_tail,0,sizeof(ctx->uart_fifo_tail));
     ctx->uart_tx_active=0;
 
     if (tcp_reconnect(ctx)!=SR_OK) { ctx->collecting=FALSE; return SR_ERR; }
 
-    free(ctx->input_buf); free(ctx->output_buf); free(ctx->batch_buf);
+    free(ctx->input_buf);
+    free(ctx->event_buf);
     ctx->input_buf=malloc(UART_VCD_BUFSIZE);
-    ctx->output_buf=malloc(UART_VCD_OUTPUT_SIZE);
-    ctx->batch_buf=malloc(UART_VCD_BATCH_OUTPUT_SIZE);
-    if (!ctx->input_buf||!ctx->output_buf||!ctx->batch_buf)
-        { sr_err("malloc failed"); return SR_ERR_MALLOC; }
-    memset(ctx->output_buf,0,UART_VCD_OUTPUT_SIZE);
+    ctx->event_buf=malloc(sizeof(*ctx->event_buf) * UART_VCD_EVENT_BATCH_SIZE);
+    if (!ctx->input_buf||!ctx->event_buf) {
+        ctx->collecting=FALSE;
+        sr_err("malloc failed");
+        return SR_ERR_MALLOC;
+    }
+    ctx->event_buf[0].sample=0;
+    ctx->event_buf[0].state=ctx->output_state;
+    ctx->event_buf[0].reserved=0;
+    ctx->event_count=1;
 
     sr_info("Start acquisition on TCP port %d, samplerate=%llu",
             ctx->tcp_port,(unsigned long long)ctx->samplerate);
@@ -447,7 +552,8 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
 static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
 {
     (void)cb_data; struct uart_vcd_context *ctx; assert(sdi->priv); ctx=sdi->priv;
-    ctx->collecting=FALSE;
+    if (ctx->collecting)
+        send_event_end(ctx, sdi);
     if (ctx->tcp_fd>=0) { close(ctx->tcp_fd); ctx->tcp_fd=-1; }
     return SR_OK;
 }
@@ -462,19 +568,23 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
     uint8_t read_buf[UART_VCD_READ_BUF_SIZE];
     assert(sdi->priv); ctx=sdi->priv;
 
-    if (!ctx->collecting) { pkt.type=SR_DF_END; pkt.status=SR_PKT_OK;
-                            ds_data_forward(sdi,&pkt); return FALSE; }
+    if (!ctx->collecting) {
+        if (!ctx->end_sent) {
+            pkt.type=SR_DF_END; pkt.status=SR_PKT_OK;
+            ds_data_forward(sdi,&pkt);
+            ctx->end_sent=TRUE;
+        }
+        return FALSE;
+    }
     if (!(revents & G_IO_IN)) return TRUE;
 
     {
-        uint64_t es=ctx->collected_samples; int ec=0;
+        int ec=0;
 
-        while (ctx->collecting && ec < UART_VCD_EVENT_LIMIT &&
-               ctx->collected_samples-es < UART_VCD_SAMPLE_LIMIT) {
+        while (ctx->collecting && ec < UART_VCD_EVENT_LIMIT) {
 
             while (ctx->collecting && ctx->input_len >= 4 &&
-                   ec < UART_VCD_EVENT_LIMIT &&
-                   ctx->collected_samples-es < UART_VCD_SAMPLE_LIMIT) {
+                   ec < UART_VCD_EVENT_LIMIT) {
                 int c=ev2_blow_buf(ctx, sdi, ctx->input_buf + ctx->input_offset, (int)ctx->input_len);
                 if (c==0) break;
                 ctx->input_offset += c;
@@ -484,7 +594,6 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
 
             if (!ctx->collecting) break;
             if (ec >= UART_VCD_EVENT_LIMIT) break;
-            if (ctx->collected_samples-es >= UART_VCD_SAMPLE_LIMIT) break;
 
             if (ctx->input_offset) {
                 if (ctx->input_len > 0)
@@ -499,15 +608,14 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
                 if (n == 0) break;
 
                 if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {
-                    sr_info("input overflow, discarding buffered data");
-                    ctx->input_len = 0;
-                    {
-                        ssize_t keep = n;
-                        if ((uint64_t)keep > UART_VCD_BUFSIZE) keep = UART_VCD_BUFSIZE;
-                        memcpy(ctx->input_buf, read_buf, keep);
-                        ctx->input_len = (uint64_t)keep;
-                    }
-                    continue;
+                    sr_err("input overflow: %llu buffered bytes, stopping to preserve protocol framing",
+                           (unsigned long long)ctx->input_len);
+                    pkt.type=SR_DF_OVERFLOW;
+                    pkt.status=SR_PKT_DATA_ERROR;
+                    pkt.payload=NULL;
+                    ds_data_forward(sdi,&pkt);
+                    send_event_end(ctx, sdi);
+                    break;
                 }
 
                 memcpy(ctx->input_buf + ctx->input_len, read_buf, n);
@@ -515,6 +623,8 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
             }
         }
     }
+    if (ctx->collecting)
+        flush_event_batch(ctx, sdi);
     return ctx->collecting ? TRUE : FALSE;
 }
 

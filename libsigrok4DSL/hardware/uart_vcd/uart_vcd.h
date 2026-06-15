@@ -25,6 +25,7 @@
 #define UART_VCD_PROTOCOL_RAW        0
 #define UART_VCD_PROTOCOL_EVENT      1
 #define UART_VCD_DEFAULT_PROTOCOL    UART_VCD_PROTOCOL_EVENT
+#define UART_VCD_EVENT_BATCH_SIZE    4096
 
 struct uart_vcd_context {
     int        tcp_fd;
@@ -35,25 +36,30 @@ struct uart_vcd_context {
     uint64_t   collected_samples;
     int        num_probes;
     gboolean   collecting;
+    gboolean   end_sent;
     gboolean   is_loop;
     gboolean   first_event;
     uint8_t   *input_buf;
     uint64_t   input_len;
     uint64_t   input_offset;
-    uint8_t   *output_buf;
-    uint8_t   *batch_buf;
-    int        batch_chunk;
+    struct sr_logic_sparse_event *event_buf;
+    uint32_t   event_count;
     int        protocol;
     uint32_t   gpio_state;
-    int        event_sample_pos;
+    uint32_t   output_state;
+    uint32_t   recorded_state;
+    uint32_t   activity_mask;
+    uint64_t   activity_report_sample;
+    uint64_t   parsed_events;
     uint8_t    uart_tx_data[8];
     int8_t     uart_tx_bit[8];
-    int8_t     uart_tx_samp_left[8];
     int8_t     uart_tx_samp_per_bit;
+    uint64_t   uart_tx_next_sample[8];
     uint8_t    uart_fifo[8][64];
     uint8_t    uart_fifo_head[8];
     uint8_t    uart_fifo_tail[8];
     int        uart_tx_active;
+    gboolean   uart_fifo_overflow;
 };
 
 static const uint64_t uart_vcd_samplerates[] = { 24000000 };
