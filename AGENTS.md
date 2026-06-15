@@ -42,7 +42,8 @@ cmake --build cmake-build-debug-system-gcc13
 ## UART_VCD driver — current state (2026-06)
 
 ### Architecture
-- **TCP-only**: driver connects to `127.0.0.1:12345` (configurable in `uart_vcd.h`)
+- **TCP-only**: driver connects to the host configured by `SR_CONF_TCP_HOST`
+  on port `12345`; the compile-time default is defined in `uart_vcd.h`
 - **Device name**: "Uart VCD" (was "FT232R USB UART")
 - **Python bridge**: `low_part/bridge/serial_bridge.py` — scans serial ports, user picks one, listens as TCP server, bridges serial↔TCP bidirectionally (thread-based, Windows-compatible)
 - **Flow**: MCU → Serial → Python bridge (TCP server on :12345) → DSView (TCP client)
@@ -82,7 +83,7 @@ cmake --build cmake-build-debug-system-gcc13
 |------|------|
 | `libsigrok4DSL/hardware/uart_vcd/uart_vcd.c` | TCP-only driver, protocol v2 parser, UART TX sim |
 | `libsigrok4DSL/hardware/uart_vcd/uart_vcd.h` | Driver config, context struct |
-| `DSView/res/uart-vcd0.def.dsc` | Default profile: 32ch, 8 UART decoders on RX0-7 @ 500Kbaud, 24MHz samplerate |
+| `DSView/res/uart-vcd0.def.dsc` | Default profile for 32 channels and 8 UART decoders; values must stay synchronized with `uart_vcd.h` |
 | `low_part/UART_V1.0/gpio_event.c` | MCU protocol v2 encoder |
 | `low_part/UART_V1.0/app_dma.c` | MCU DMA + main_loop |
 | `low_part/bridge/serial_bridge.py` | Python serial↔TCP bridge |
@@ -97,7 +98,14 @@ cmake --build cmake-build-debug-system-gcc13
 - TCP blocking: set `O_NONBLOCK` on TCP socket after connect
 - State drift on restart: MCU sends absolute high/low, never toggle
 - GPIO timing: delta emitted BEFORE state change (idle → then toggle)
-- UART baud: 24MHz/24MHz=1 sample/bit (was incorrectly 1→2)
+- Virtual RX UART: 6Mbaud at 24MHz = 4 samples/bit
+
+### Memory model
+- `uart_vcd.c` expands protocol events into dense `LA_CROSS_DATA`
+- `LogicSnapshot` stores one bit per sample per enabled channel plus mipmaps
+- 32 channels at 24MHz consume about 97.5MB/s in `LogicSnapshot`
+- DSL `SR_CONF_RLE` is an FPGA acquisition feature and does not provide a
+  compressed Snapshot representation
 
 ## License
 GPLv3+

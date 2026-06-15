@@ -1,127 +1,85 @@
-# UART_VCD 驱动开发会话记忆
+# UART_VCD 当前开发状态
 
-## 项目概述
-为 DSView（基于 libsigrok4DSL）添加一个新的硬件驱动 `uart-vcd`，通过 FT232R USB UART 串口接收 32bit 数据，将每个 bit 映射为一个逻辑分析通道（共 32 通道 D0-D31），在界面上显示波形翻转。
+更新时间：2026-06
 
----
+## 架构
 
-## 文件清单
-
-| 文件 | 说明 |
-|------|------|
-| `libsigrok4DSL/hardware/uart_vcd/uart_vcd.h` | 驱动头文件，常量定义，上下文结构体 |
-| `libsigrok4DSL/hardware/uart_vcd/uart_vcd.c` | 驱动主实现（632行） |
-| `libsigrok4DSL/hwdriver.c` | 添加 uart_vcd 驱动注册 |
-| `libsigrok4DSL/config.h` | 添加 `#define HAVE_UART_VCD 1` |
-| `CMakeLists.txt` | 将 uart_vcd.c 加入编译源列表 |
-| `DSView/pv/config/appconfig.cpp` | 已清理调试日志 |
-| `test_uart_vcd_event_protocol.md` | Event 协议测试数据文档 |
-
----
-
-## Event + Delta Time 协议 (NEW)
-
-### 概述
-新增替代采集协议 `UART_VCD_PROTOCOL_EVENT`，MCU 仅在 GPIO 变化时发送事件，不用固定周期发送全部 GPIO 状态，大幅降低 UART 带宽占用。
-
-### 数据包格式
-```
-[varint delta_time] [varint toggle_mask] ... [0x00]
-```
-- `delta_time`: 距上一事件的 tick 数 (varint, >0, delta=0 表示流结束)
-- `toggle_mask`: 发生翻转的 GPIO mask (varint, 32bit)
-- Tick 周期: 1us, 采样率自动切换为 1MHz
-
-### Varint 编码 (LE)
-每字节低 7 位为数据，bit7=1 表示还有后续字节。
-
-### 协议切换
-修改 `uart_vcd.h`:
-```c
-#define UART_VCD_DEFAULT_PROTOCOL UART_VCD_PROTOCOL_EVENT
+```text
+MCU -> UART 3 Mbps -> serial_bridge.py -> TCP :12345
+    -> uart-vcd driver -> LogicSnapshot -> DSView UI
 ```
 
-### 新增文件内容
-- `uart_vcd.h`: 添加 `UART_VCD_PROTOCOL_RAW/EVENT` 常量，`event_parse_state` 枚举，context 中 8 个事件解析字段
-- `uart_vcd.c`: 添加 `uart_vcd_decode_varint_byte()`, `emit_event_sample()`, `process_event_byte()`, `receive_data_event()` 四个函数；`receive_data` 重命名为 `receive_data_raw`；`hw_dev_acquisition_start` 根据 protocol 选择回调
+- 驱动为 TCP client，不直接打开串口。
+- bridge 为 TCP server；TCP 未连接时丢弃串口数据。
+- 设备名为 `Uart VCD`，驱动名为 `uart-vcd`。
+- 设备使用 `DEV_TYPE_USB` 以接入 DSView hardware/stream/loop 流程。
 
-### 带宽对比 (测试场景1: 600us, 7事件)
-| 模式 | 数据量 | 说明 |
-|------|--------|------|
-| RAW @1MHz | 2400 bytes | 600×4 bytes/sample |
-| EVENT | **17 bytes** | ~141x 压缩 |
+## 当前协议
 
----
+只使用 protocol v2：
 
-## 关键设计决策
+```text
+[uint24_le delta_ticks][header][payload]
+```
 
-### 1. 串口配置
-- 打开标志: `O_RDWR | O_NOCTTY`（无 O_NONBLOCK）
-- 读取模式: `VMIN=0, VTIME=1`（最多阻塞 100ms）
-- 事件轮询: `sr_session_source_add(fd, G_IO_IN, 100ms timeout)`
+- timer/sample rate：24 MHz。
+- D0-D23：GPIO low/high/toggle。
+- RX0-RX7：字符串事件，由 PC 合成 8N1 UART 波形。
+- 字符串 payload：
 
-### 2. 32bit 数据格式
-- 每个采样 = 连续 4 个串口字节，**小端序**
-- `sample = byte0 | (byte1<<8) | (byte2<<16) | (byte3<<24)`
-- bit[0] → D0, bit[1] → D1, ..., bit[31] → D31
-- bit=1 显示高电平，bit=0 显示低电平
+```text
+[channel][total_len][label][data][padding-to-4-bytes]
+```
 
-### 3. 位打包 (pack_output_block)
-- 每 64 个采样（256 字节串口输入）打包为一个输出帧
-- 输出帧: 256 字节 = 32 通道 × 8 字节/通道
-- 每字节 = 8 个连续时间采样（同通道），LSB 较早
-- 格式: LA_CROSS_DATA, unitsize=1
+MCU 的 `gpio_event_toggle()` 在本地状态上转换为 absolute low/high，避免 PC
+重连后因丢包产生 toggle 状态漂移。
 
-### 4. 设备类型
-- `dev_type = DEV_TYPE_USB`（而非 DEV_TYPE_SERIAL）
-- 原因: DSView `is_hardware()` 仅检查 `DEV_TYPE_USB`
-- 使 Loop 模式、stream mode 等硬件特性可用
+## 关键实现
 
-### 5. Loop 模式
-- 启用条件: `SR_CONF_OPERATION_MODE = LO_OP_STREAM` + `SR_CONF_LOOP_MODE`
-- Loop 模式下不自动停止，持续转发数据，由用户手动停止
+| 文件 | 作用 |
+|---|---|
+| `libsigrok4DSL/hardware/uart_vcd/uart_vcd.c` | TCP、v2 parser、dense sample 展开、UART 波形合成 |
+| `libsigrok4DSL/hardware/uart_vcd/uart_vcd.h` | 驱动配置和 context |
+| `low_part/UART_V1.0/gpio_event.c` | MCU v2 encoder 和 ping-pong DMA TX |
+| `low_part/UART_V1.0/app_dma.c` | MCU UART/平台初始化和测试主循环 |
+| `low_part/bridge/serial_bridge.py` | UART 到 TCP 的单向转发 |
+| `test_uart_vcd_event_protocol_2.md` | 当前协议定义 |
+| `uart_vcd_data_path.md` | 数据通路和内存分析 |
 
-### 6. SR_DF_END 发送策略
-- **由 receive_data 回调发送**，而非 hw_dev_acquisition_stop
-- 原因: session 循环会两次调用 stop，导致双重 END 引发 crash
-- 回调检测 `!collecting` 时发送 END 并返回 FALSE
+## 当前参数
 
----
+| 参数 | 值 |
+|---|---:|
+| MCU/bridge UART | 3,000,000 baud |
+| TCP port | 12345 |
+| sample rate | 24,000,000 samples/s |
+| virtual RX baud | 6,000,000 baud |
+| channel count | 32 |
+| input buffer | 1 MiB |
+| output chunk | 64 samples / 256 bytes |
+| batch output | 256 chunks / 64 KiB |
+| per-callback event limit | 2,048 |
+| per-callback sample limit | 3,145,728 |
+| per-event delta clamp | 12,000,000 |
 
-## 已修复的问题
+## 已知约束
 
-1. **"Unknown capability" 日志刷屏** — config_get/set 默认分支静默返回 SR_ERR_NA，添加常用 key 处理
-2. **停止采集后页面死机** — 移除 O_NONBLOCK，添加 100ms poll 超时
-3. **第二次采集无数据** — hw_dev_acquisition_start 添加串口重连检查，stop 不再关闭 fd
-4. **重复设备条目** — hw_scan 通过 drvc->instances 去重
-5. **Loop 模式不可用** — dev_type 改为 DEV_TYPE_USB，OPERATION_MODE 返回 LO_OP_STREAM
-6. **Loop 模式停止崩溃** — SR_DF_END 改为由回调统一发送
+- `LogicSnapshot` 保存 dense 位图，32 通道 24 MHz 时约增长 97.5 MB/s。
+- DSL RLE 是 FPGA 侧能力，不能直接解决 UART_VCD Snapshot 内存。
+- UART_VCD 当前忽略 channel disable，默认按全部 32 通道存储。
+- 默认 profile 的 sample rate/decoder baud 可能与驱动常量漂移，修改配置时需
+  同时核对 `uart_vcd.h` 和 `DSView/res/uart-vcd0.def.dsc`。
+- `send_event_test.py` 和 `test_uart_vcd_event_protocol.md` 属于旧 varint
+  protocol，不能用于当前驱动。
 
----
-
-## 当前配置参数
-
-| 参数 | 默认值 | 可修改 |
-|------|--------|--------|
-| 串口路径 | /dev/ttyUSB0 | 仅代码修改 |
-| 波特率 | 1000000 (1M) | config_set |
-| 采样率 | 100 kHz | config_set (可选列表: 1 MHz) |
-| 采样数上限 | 100M (SR_Mn(100)) | config_set |
-| 通道数 | 32 | 固定 |
-| 模式 | LOGIC | 固定 |
-| Loop | false | 界面切换 |
-| 输入缓冲区大小 | 65536 bytes (64K) | 仅代码修改 |
-| 每帧采样数 | 64 | 固定 |
-| 每输出帧大小 | 256 bytes (32ch × 8 bytes) | 固定 |
-| 协议模式 | RAW (0) | 代码修改 (UART_VCD_DEFAULT_PROTOCOL) |
-| Event Tick周期 | 1000ns (1us) | 仅代码修改 |
-
----
-
-## 编译命令
+## 构建
 
 ```bash
-cmake --build /home/soyo/Telink/workspace/DSView/cmake-build-debug-system-gcc13
+cmake --build cmake-build-debug-system-gcc13
 ```
 
-输出: `/home/soyo/Telink/workspace/DSView/build.dir/DSView`
+输出：
+
+```text
+build.dir/DSView
+```

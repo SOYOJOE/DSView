@@ -221,13 +221,6 @@ void gpio_event_toggle(int channel)
         gpio_event_emit(g_gpio_state | mask, GPIO_HIGH, channel);
 }
 
-void gpio_event_write(uint32_t mask, uint32_t value)
-{
-    mask &= ((1u << (GPIO_EVENT_GPIO_MAX + 1)) - 1);
-    value &= mask;
-    gpio_event_emit((g_gpio_state & ~mask) | value, GPIO_TOGGLE, 0);
-}
-
 void gpio_event_init(void)
 {
     g_gpio_state   = 0;

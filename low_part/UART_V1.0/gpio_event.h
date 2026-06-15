@@ -4,7 +4,7 @@
  * 24MHz system clock, raw tick delta, fixed-size header encoding.
  * Compatible with DSView uart-vcd EVENT protocol v2 driver.
  *
- * TX path uses a 16KB ping-pong DMA ring buffer for non-blocking transmission.
+ * TX path uses two 4KB ping-pong DMA buffers for non-blocking transmission.
  *
  * Layering:
  *   gpio_event.c — all logic (event encoder, TX ring buffer, UART ISR)
@@ -60,7 +60,6 @@ void gpio_event_reset_timer(void);
 void gpio_event_high(int channel);
 void gpio_event_low(int channel);
 void gpio_event_toggle(int channel);
-void gpio_event_write(uint32_t mask, uint32_t value);
 void gpio_event_send_string(int channel, int render_mode,
                             const uint8_t *label, int label_len,
                             const uint8_t *data,  int data_len);

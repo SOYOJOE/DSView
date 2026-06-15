@@ -1,322 +1,235 @@
-# UART_VCD 数据通路说明
+# UART_VCD 当前数据通路与内存分析
 
-## 概述
+## 1. 当前架构
 
-uart_vcd 驱动程序从串口接收 32bit 原始数据，将每一个 bit 映射为一个逻辑分析通道，
-转换后的数据经 libsigrok 数据总线 → Snapshot 缓冲层 → UI 渲染管线，最终在屏幕上
-以 32 通道逻辑波形呈现。
+UART_VCD 使用事件协议，不再从串口接收每个采样点的 32-bit GPIO 状态。
 
-```
-串口原始字节 → [接收缓冲] → [pack_output_block 位打包] → [SR_DF_LOGIC 数据包]
-    → [data_feed_callback 分发] → [LogicSnapshot 叶子块存储] → [UI 渲染]
-```
-
----
-
-## 1. 串口输入层
-
-### 1.1 串口配置
-
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| 波特率 | 115200 (默认) | 可通过 config_set 修改 |
-| 数据位 | 8 | cfmakeraw 默认 |
-| 停止位 | 1 | cfmakeraw 默认 |
-| 校验位 | 无 | cfmakeraw 默认 |
-| 流控 | 无 | cfmakeraw 默认 |
-| 读取模式 | VMIN=0, VTIME=1 | 最多阻塞 100ms |
-| 打开标志 | O_RDWR \| O_NOCTTY | 非阻塞轮询，由 G_IO_IN 驱动 |
-
-### 1.2 单次 32bit 采样格式
-
-每个完整的 32bit 采样由连续的 4 个串口字节组成，**小端序 (Little-Endian)**：
-
-```
-串口字节序列: Byte0, Byte1, Byte2, Byte3
-32bit 重构值: Byte0 | (Byte1 << 8) | (Byte2 << 16) | (Byte3 << 24)
-
-位映射:  bit[0]  → D0 通道
-         bit[1]  → D1 通道
-         bit[2]  → D2 通道
-         ...
-         bit[31] → D31 通道
+```text
+Telink MCU
+  -> protocol v2 event stream
+  -> UART 3 Mbps
+  -> low_part/bridge/serial_bridge.py
+  -> TCP server :12345
+  -> libsigrok4DSL/hardware/uart_vcd/uart_vcd.c
+  -> 24 MHz dense LA_CROSS_DATA
+  -> SigSession
+  -> LogicSnapshot
+  -> waveform view and protocol decoders
 ```
 
-示例：串口收到 `0x03 0x00 0x00 0x80`
+通道分配：
 
-```
-重构值 = 0x03 | (0x00 << 8) | (0x00 << 16) | (0x80 << 24)
-       = 0x80000003
+| 通道 | 用途 |
+|---|---|
+| D0-D23 | GPIO high/low/toggle 事件 |
+| RX0-RX7 | 字符串事件在 PC 端合成的 8 路 UART RX 波形 |
 
-此时通道状态:
-  D0  = 1  (bit0  = 1)
-  D1  = 1  (bit1  = 1)
-  D2  = 0  (bit2  = 0)
-  ...
-  D31 = 1  (bit31 = 1)
-```
+MCU 的 24 MHz `stimer_get_tick()` 与 DSView 的 24 MHz sample 一一对应。
 
----
+## 2. Protocol v2
 
-## 2. 驱动层数据转换
+每个事件以 3-byte little-endian delta tick 开头：
 
-### 2.1 采集启动 (hw_dev_acquisition_start)
-
-```
-1. 重置 collected_samples = 0, collecting = TRUE
-2. 检查串口 fd 有效性，必要时重新打开
-3. 分配 input_buf (64KB) 和 output_buf (256 bytes)
-4. 注册 G_IO_IN 事件源：sr_session_source_add(fd, G_IO_IN, 100ms, receive_data)
+```text
+[delta_ticks:3][header:1][optional payload]
 ```
 
-### 2.2 数据接收与累积 (receive_data)
+GPIO 事件固定为 4 bytes：
 
-```
-每次 G_IO_IN 触发：
-  1. read(fd, read_buf, 64KB) → 读原始字节
-  2. memcpy 到 ctx->input_buf 尾部，累加 input_len
-  3. 当 input_len >= 256 bytes 时，进入转换循环
+```text
+[delta:3][header:1]
 ```
 
-### 2.3 位打包 — pack_output_block (核心转换)
+字符串事件为：
 
-这是将 64 个 32bit 采样（256 字节串口原始数据）转换为一帧 LA_CROSS_DATA
-格式输出的过程。
-
-**关键常量：**
-```c
-UART_VCD_UART_BYTES_PER_SAMPLE = 4    // 每个采样 4 字节 (32bit)
-UART_VCD_SAMPLES_PER_OUTPUT    = 64   // 每帧 64 个时间采样
-UART_VCD_NUM_PROBES            = 32   // 通道数
-UART_VCD_OUTPUT_SIZE           = 256  // 输出帧大小 = 32×8 = 256 bytes
+```text
+[delta:3][header:1][channel:1][total_len:1][label][data][padding]
 ```
 
-**转换算法（伪代码）：**
-```
-输入: input_buf[0..255] — 64个32bit采样 × 4字节/采样
+`channel` 范围为 0-7，对应 RX0-RX7。字符串 payload 从 `channel`
+开始按 4 bytes 对齐。完整定义见 `test_uart_vcd_event_protocol_2.md`。
 
-对于每个通道 ch (0..31):
-  对于每个输出字节 b (0..7):      // 8字节 = 64个采样点
-    令输出字节 = 0
-    对于每个 bit 位置 s (0..7):   // 每个字节 8 个采样点
-      sample_idx = b * 8 + s      // 采样序号 0..63
-      sample_ptr = input_buf + sample_idx * 4
-      32bit_sample = sample_ptr[0] | (ptr[1] << 8) | (ptr[2] << 16) | (ptr[3] << 24)
-      若 (32bit_sample & (1 << ch)):   // 该采样中通道 ch 为高
-        byte_val |= (1 << s)           // 在输出字节中置对应位
-    输出[ch * 8 + b] = byte_val
-```
+## 3. PC 端处理
 
-**输出缓冲区排布 (256 bytes)：**
+### 3.1 TCP 接收
 
-| 偏移 | 内容 | 说明 |
-|------|------|------|
-| 0..7 | D0 通道 | 8字节 = 64个时间采样点 |
-| 8..15 | D1 通道 | 8字节 = 64个时间采样点 |
-| 16..23 | D2 通道 | ... |
-| ... | ... | ... |
-| 248..255 | D31 通道 | 8字节 = 64个时间采样点 |
+- 驱动连接 `tcp_host:12345`，默认 host 当前定义在 `uart_vcd.h`。
+- socket 在连接阶段和采集阶段均为 non-blocking。
+- 单次读取缓冲为 64 KiB，累积输入缓冲为 1 MiB。
+- 缓冲区溢出时丢弃旧的未解析数据，保留最新一次读取。
 
-每 1 个字节 = 连续的 8 个时间采样点（同一通道），LSB 为较早采样，MSB 为较晚采样。
+### 3.2 事件展开
 
-示例：D0 通道输出字节[0] = 0x55 = 0b01010101
+`ev2_blow_buf()` 完成一个事件的解析：
 
-```
-bit0(S0)  bit1(S1)  bit2(S2)  bit3(S3)  bit4(S4)  bit5(S5)  bit6(S6)  bit7(S7)
-   1         0         1         0         1         0         1         0
+1. 读取 24-bit delta。
+2. 先输出 delta 对应的旧状态采样。
+3. GPIO 事件再更新 GPIO 状态。
+4. 字符串事件加入对应 RX 通道的 64-byte FIFO。
 
-采样 S0: D0=1, 采样 S1: D0=0, 采样 S2: D0=1 ... 波形呈现 01010101 翻转
-```
+首事件 delta 被替换为 1 sample，异常大 delta 会被限制：
 
-### 2.4 输出数据包 (SR_DF_LOGIC)
+| 限制 | 当前值 |
+|---|---:|
+| 单事件最大 delta | 12,000,000 samples |
+| 单回调最大事件数 | 2,048 |
+| 单回调最大展开采样数 | 3,145,728 |
 
-```c
-packet.type       = SR_DF_LOGIC
-packet.payload    = &logic
-logic.format      = LA_CROSS_DATA    // 通道优先排列
-logic.index       = 0
-logic.order       = 0
-logic.length      = 256              // 输出帧字节数
-logic.unitsize    = 1                // 1 字节 = 8 个采样点
-logic.data_error  = 0
-logic.error_pattern = 0
-logic.data        = output_buf       // 256 字节输出帧
+### 3.3 RX0-RX7 UART 合成
+
+每个字符生成标准 8N1 波形：
+
+```text
+start(0) + 8 data bits LSB-first + stop(1)
 ```
 
-### 2.5 停止条件
+当前虚拟 UART 波特率为：
 
-- **非 Loop 模式**: `collected_samples >= total_samples` → 发送 SR_DF_END → `collecting = FALSE`
-- **Loop 模式**: 永不自动停止，持续转发数据，由 UI 用户手动停止
-
----
-
-## 3. Session 数据总线
-
-### 3.1 数据分发 (data_feed_callback)
-
-```
-ds_data_forward(sdi, packet)
-  └→ 回调注册的 data_feed_callback (sigsession.cpp:1480)
-      └→ case SR_DF_LOGIC: feed_in_logic() → 第一帧/后续帧分发
+```text
+UART_VCD_UART_BAUD_RATE = 24 MHz / 4 = 6 Mbaud
 ```
 
-### 3.2 第一帧 vs 后续帧
+因此每 bit 为 4 samples。物理 MCU 到 bridge 的 3 Mbps UART 与这里的
+虚拟 6 Mbaud 波形是两个独立参数。
 
-```
-第一帧 (last_ended == true):
-  first_payload(o, sample_limit, channels, bNotFree)
-    ├→ init() 清空旧数据
-    ├→ 设置 _total_sample_count, _channel_num
-    ├→ 创建各通道叶子块索引
-    └→ append_cross_payload(o)  // 存储第一帧数据
+HEX 模式将一个 data byte 转成两个大写 ASCII hex 字符；ASCII 模式直接
+发送 data byte。label 始终作为 ASCII 字节发送。
 
-后续帧:
-  append_payload(o) → append_cross_payload(o)
+### 3.4 LA_CROSS_DATA 输出
 
-终止帧 (SR_DF_END):
-  capture_ended() → _last_ended = true
-  └→ 触发解码线程，UI 更新结束状态
+驱动将事件展开为 DSView 现有逻辑数据格式：
+
+```text
+64 samples x 32 channels = 256 bytes
 ```
 
----
+每个通道占连续 8 bytes，每个 bit 是一个采样点，LSB 表示较早采样。
+最多批量聚合 256 个 chunk，即 65,536 bytes，再通过 `ds_data_forward()`
+发送 `SR_DF_LOGIC`。
 
-## 4. LogicSnapshot 存储格式
+## 4. LogicSnapshot 存储
 
-### 4.1 关键常量
+`LogicSnapshot` 只接受 dense `LA_CROSS_DATA`。每个通道分别保存完整位图，
+并生成三级 mipmap 供波形边沿查询。
 
-```
-ScalePower  = 6
-Scale       = 64     (1<<6)
-ScaleSize   = 8      (Scale/8)
-ScaleLevel  = 4
-LeafBlockPower = 24  (ScalePower × ScaleLevel)
-LeafBlockSamples = 16,777,216  (1<<24)
-```
+关键参数：
 
-### 4.2 数据存储架构
+| 参数 | 值 |
+|---|---:|
+| LeafBlockSamples | 16,777,216 samples |
+| LeafBlockSpace | 2,130,440 bytes/channel |
+| 32 通道一组 leaf block | 68,174,080 bytes |
+| 一组覆盖时间（24 MHz） | 0.699 s |
 
-```
-_ch_data[32][N]              ← 32 个通道，每个通道 N 个 RootNode
-  └─ RootNode
-       ├─ tog: uint64_t      ← 边沿检测标志（仅根节点层级）
-       ├─ first: uint64_t    ← 最近数据块首字
-       ├─ last: uint64_t     ← 最近数据块尾字
-       └─ lbp[64]: void*     ← 64 个叶子块指针
+LeafBlockSpace 包括原始位图和 mipmap：
 
-叶子块:
-  每个叶子块 = LeafBlockSpace bytes (约 1.18 MB)
-  可存储 LeafBlockSamples (16M) 个采样点
-  存储层级: [L0] 8B = 64bit 每层 → [L1] 聚合 64x → [L2] 聚合 64x → [L3]
+```text
+(64 + 64^2 + 64^3 + 64^4) / 8 = 2,130,440 bytes
 ```
 
-### 4.3 输入数据注入 (append_cross_payload)
+## 5. 内存增长原因
 
-```
-输入: 256 bytes LA_CROSS_DATA (32通道 × 8字节/通道)
+32 通道、24 MHz 的原始位图速率：
 
-位对齐阶段 (处理上一帧未对齐的碎片):
-  逐字节拷贝至对应通道叶子块
-  _byte_fraction: 该通道当前字节偏移 (0..7)，每次 +1 模 8
-  _ch_fraction: 当前通道索引 (0..31)，每次字节满 8 时 +1 模 32
-
-批量拷贝阶段 (字节对齐后):
-  while (len >= 8):
-    64bit 贪心读取: *read_ptr++ = *write_ptr  (Scale=64 个采样/次)
-    read_ptr 跨通道跳转: read_ptr += _channel_num (32)
-    每处理一个通道: last_chan++
-    每处理完一轮所有 32 通道: filled_sample += Scale (64)
-    
-    当 filled_sample == LeafBlockSamples (16M):
-      计算 mipmap (calc_mipmap)
-      切换到下一通道的叶子块
-
-64bit 存储单元格式:
-  每 64bit 存储 64 个连续的采样点（同一通道）
-  MSB → 较晚采样
-  LSB → 较早采样
+```text
+24,000,000 samples/s * 32 channels / 8 = 96,000,000 bytes/s
 ```
 
-### 4.4 叶子块内排布
+mipmap 的额外比例：
 
-```
-叶子块[通道 K]:
-  字节 0..7:   采样 0..63     (Scale=64 采样点)
-  字节 8..15:  采样 64..127
-  字节 16..23: 采样 128..191
-  ...
-  读/写指针: (uint64_t*)(lbp + offset/Scale)，每次 +1 = Scale(64)个采样
+```text
+1/64 + 1/64^2 + 1/64^3 = 1.5873%
 ```
 
----
+所以 LogicSnapshot 的理论增长约为：
 
-## 5. UI 渲染链路
-
-```
-get_display_edges(start, end, width, max_togs, pixels_offset, min_length, sig_index)
-  → 基于像素宽度 + 时间范围，从多级 mipmap 层级中选最佳层级
-  → 查找边沿位置 (get_nxt_edge)
-  → 返回 EdgePair 列表 { <采样索引, 边状态(上升/下降)>, ... }
-  → 每条边对应 UI 中的一个水平像素位置
-  → QPainter 渲染为矩形波（垂直翻转边）
+```text
+96,000,000 * 1.015873 = 97,523,804 bytes/s
 ```
 
----
+这就是每秒接近 100 MB 的主要来源。驱动自身长期缓冲约为：
 
-## 6. 端到端数据流示例
+| 缓冲 | 大小 |
+|---|---:|
+| input_buf | 1 MiB |
+| output_buf | 256 bytes |
+| batch_buf | 64 KiB |
+| TCP receive buffer | 512 KiB（内核） |
 
-### 假设：串口连续收到 4 字节/采样 × 128 个采样
+因此缩小 `uart_vcd.c` 的 batch 或 input buffer 不能显著降低总内存。
 
-```
-串口原始数据 (512 bytes):
-  S0:  0x01 0x00 0x00 0x00  → D0=1
-  S1:  0x02 0x00 0x00 0x00  → D1=1
-  S2:  0x04 0x00 0x00 0x00  → D2=1
-  S3:  0x08 0x00 0x00 0x00  → D3=1
-  ... (64 个采样后 input_buf 累积 256 bytes，触发 pack)
+## 6. DSL RLE 是否可复用
 
-pack_output_block 输出 (256 bytes):
-  D0[0..7]:  0xFF 0x00 0x00 ... → 前8个采样 D0=全部高，后56个=全部低
-  D1[0..7]:  0x00 0xFF 0x00 ... → 采样8..15 D1=高
-  D2[0..7]:  0x00 0x00 0xFF ... → 采样16..23 D2=高
-  ...
+DSL 的 `SR_CONF_RLE` 是硬件/FPGA 采集能力。`dsl_start_transfers()` 将 RLE
+配置写入 FPGA，但 `receive_transfer()` 最终仍向 Session 提交普通
+`LA_CROSS_DATA`。`LogicSnapshot` 没有 RLE packet 格式，也不会保存压缩流。
 
-ds_data_forward → SR_DF_LOGIC → data_feed_callback
+因此只给 UART_VCD 增加 `SR_CONF_RLE` 开关没有效果。即使驱动内部使用 RLE，
+在调用 `ds_data_forward()` 前展开成 `LA_CROSS_DATA`，Snapshot 内存仍然约
+97.5 MB/s。
 
-LogicSnapshot:
-  samples = ceil(256 * 8 / 32) = 64 采样
-  D0: byte0 存入 lbp offset 0 (采样0..63)
-  D1: byte0 存入 lbp offset 0
+## 7. 可行优化
 
-后续 64 个采样 → 第二帧 256 bytes → append_cross_payload → D0..D31 各追加 64 采样
+### 7.1 启用真实的通道开关
 
-UI 渲染:
-  用户视野 = (start=0, end=64) → 请求 D0 边沿
-  get_display_edges → 识别 D0 在采样0处上升（bit[0] = 1）
-  → 渲染像素位置 0 处显示上升沿 + 高电平
+UART_VCD 当前对 `SR_CONF_PROBE_EN` 总是返回 true，并忽略 set。Snapshot
+只为 enabled channel 分配数据，因此支持关闭未使用通道可近似线性节省内存：
+
+```text
+每个 enabled channel约 3.05 MB/s
 ```
 
----
+这是低风险、低侵入的第一步，但 32 通道全开时没有收益。驱动输出布局必须
+同时改为只包含 enabled channel，否则 Snapshot 会按错误通道数解释 packet。
 
-## 7. 调试入口
+### 7.2 限制 loop mode 时间窗口
 
-| 调试目标 | 位置 | 方法 |
-|---------|------|------|
-| 串口数据接收 | uart_vcd.c:558-572 | 打印 read() 返回值 n 和原始字节 |
-| 位打包输出 | uart_vcd.c:574-599 | 打印 output_buf 的十六进制内容 |
-| Session 分发 | sigsession.cpp:1416-1419 | 断点在 SR_DF_LOGIC case |
-| Snapshot 存储 | logicsnapshot.cpp:215-400 | 跟踪 append_cross_payload 分支 |
-| UI 渲染请求 | logicsnapshot.cpp:113-117 | 跟踪 get_display_edges 参数 |
+现有 LogicSnapshot 已支持按 `total_samples` 循环释放旧 leaf block。设置
+固定保留时间可以把内存从持续增长变成固定上限：
 
----
+| 保留时间 | 32 通道估算内存 |
+|---|---:|
+| 1 s | 约 98 MB |
+| 5 s | 约 488 MB |
+| 10 s | 约 975 MB |
 
-## 8. 数据尺寸速查
+此方案不降低每秒写入带宽，但适合实时观察。
 
-| 量 | 值 | 公式 |
-|----|-----|------|
-| 单采样串口字节 | 4 | UART_VCD_UART_BYTES_PER_SAMPLE |
-| 每帧采样数 | 64 | UART_VCD_SAMPLES_PER_OUTPUT |
-| 每帧串口输入 | 256 bytes | 64 × 4 |
-| 每帧输出 | 256 bytes | 32 × 8 |
-| 输出字节/通道/帧 | 8 bytes | = 64 采样 |
-| Snapshot 每 64bit 读 | 64 采样 | Scale = 2^6 |
-| 叶子块容量 | 16M 采样 | LeafBlockSamples = 2^24 |
+### 7.3 Event-native sparse snapshot
+
+protocol v2 本身已经是压缩事件流。最有效方案是让上层直接保存：
+
+```text
+GPIO: (sample_index, new_level)
+RX:   (sample_index, byte stream/render mode)
+```
+
+波形绘制可直接从边沿列表生成，内存取决于事件数量而不是采样率。对于长空闲
+GPIO，压缩比可达到数千倍。
+
+主要改动点：
+
+- 扩展 `sr_datafeed_logic` 或增加新的 event packet 类型。
+- 新增 sparse snapshot，或为 `LogicSnapshot` 增加 event backend。
+- 实现 `get_sample()`、边沿查询、循环窗口和保存功能。
+- 协议解码器需要按需将指定时间窗口展开成 dense sample block。
+
+这是推荐的长期方案，但涉及 Session、Snapshot、decoder 和文件保存边界。
+
+### 7.4 Leaf block 常量状态压缩
+
+折中方案是在 `LogicSnapshot` 中将全 0/全 1 的 leaf block 表示为常量标记，
+仅在块内出现边沿时分配 2.03 MiB 数据。它能显著压缩长期静止的 GPIO，
+且保留现有查询接口。
+
+限制是当前写入过程会在 leaf block 尚未完成时立即分配 dense buffer。要获得
+收益，需要增加按块事件构建或延迟物化机制。RX 通道持续产生串行边沿时仍会
+使用完整块。
+
+## 8. 推荐顺序
+
+1. 支持真实 channel enable，降低未使用通道成本。
+2. 为实时模式设置明确的 ring window，阻止无限增长。
+3. 实现 event-native sparse snapshot，并为 decoder 按需展开。
+4. 不建议单独照搬 DSL 的 `SR_CONF_RLE`，因为当前 Session/Snapshot 接口
+   最终仍要求 dense sample data。
