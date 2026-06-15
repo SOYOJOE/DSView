@@ -51,6 +51,10 @@ struct uart_vcd_context {
     uint32_t   activity_mask;
     uint64_t   activity_report_sample;
     uint64_t   parsed_events;
+    uint64_t   bad_packets;
+    uint64_t   recovered_packets;
+    uint64_t   dropped_input_bytes;
+    uint64_t   dropped_uart_bytes;
     uint8_t    uart_tx_data[8];
     int8_t     uart_tx_bit[8];
     int8_t     uart_tx_samp_per_bit;

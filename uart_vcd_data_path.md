@@ -58,6 +58,16 @@ GPIO 事件固定为 4 bytes：
 - 单次读取缓冲为 64 KiB，累积输入缓冲为 1 MiB。
 - 缓冲区溢出时丢弃旧的未解析数据，保留最新一次读取。
 
+### 3.1.1 MCU UART/DMA 发送
+
+- 字符串事件先完整写入 ping-pong buffer，最后一次性提交长度，DMA 不会看到
+  半帧。
+- DMA busy 时仍可写另一个 4 KiB buffer；空间不足时整帧丢弃，不再拆成 header
+  和 payload 两次发送。
+- TXDONE ISR 只清除 busy 状态，不在中断中切换发送 buffer。
+- `gpio_event_irq_high/low/toggle()` 是 GPIO ISR 专用快速接口，不检查通道，也不
+  在 GPIO ISR 内启动 DMA；主循环继续调用 `uart_tx_poll()`。
+
 ### 3.2 事件调度
 
 `ev2_blow_buf()` 完成一个事件的解析：
@@ -112,8 +122,17 @@ ASCII render，各生成 11 个虚拟 UART 字符。
 驱动每 0.25 秒逻辑时间输出一次 `activity` 掩码。正常复合测试应为
 `activity=0xffffffff`，否则可直接定位是 GPIO 还是 RX 通道未产生边沿。
 
-输入缓冲溢出时驱动现在报告 `SR_DF_OVERFLOW` 并停止采集，不再丢弃数据后从
-随机字节继续解析，避免协议失帧被误显示为异常通道和超大 delta。
+解析器会校验事件 header、字符串长度和对齐 padding。收到非法帧时打印原始
+十六进制数据，向后寻找可连续解析的事件边界，丢弃错帧后继续采集。RX FIFO
+或输入缓冲溢出也只报告并丢弃受影响的数据，不再发送会终止 UI 会话的
+`SR_DF_OVERFLOW`。
+
+重新同步优先使用完整 string event 作为强边界。若 MCU 数据中只缺少 string
+event 的 3-byte delta，但 header、payload 和 padding 完整，PC 会使用零 delta
+恢复该字符串并继续解析；无法确定边界的 GPIO 字节不会被猜测为有效事件。
+
+稀疏事件包的 UI 接收进度按 `LogicSnapshot` 实际增加的 sample 数计算，不再
+把 16-byte sparse record 错当成普通 32 通道位图数据。
 ### 3.3 RX0-RX7 UART 合成
 
 每个字符生成标准 8N1 波形：

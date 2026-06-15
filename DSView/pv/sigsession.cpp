@@ -1194,6 +1194,10 @@ namespace pv
 
     void SigSession::feed_in_logic(const sr_datafeed_logic &o)
     {  
+        const bool first_payload = _capture_data->get_logic()->last_ended();
+        const uint64_t previous_sample_count = first_payload ? 0 :
+            _capture_data->get_logic()->get_ring_sample_count();
+
         if (_capture_data->get_logic()->memory_failed())
         {
             dsv_err("Unexpected logic packet");
@@ -1206,7 +1210,7 @@ namespace pv
             _trig_time = QDateTime::currentDateTime();
         }  
 
-        if (_capture_data->get_logic()->last_ended())
+        if (first_payload)
         {
             _capture_data->get_logic()->set_loop(is_loop_mode());
 
@@ -1236,7 +1240,15 @@ namespace pv
             return;
         }
 
-        set_receive_data_len(o.length * 8 / get_ch_num(SR_CHANNEL_LOGIC));
+        if (o.format == LA_SPARSE_EVENTS) {
+            const uint64_t sample_count =
+                _capture_data->get_logic()->get_ring_sample_count();
+            set_receive_data_len(sample_count > previous_sample_count ?
+                sample_count - previous_sample_count : 1);
+        } else {
+            set_receive_data_len(o.length * 8 /
+                                 get_ch_num(SR_CHANNEL_LOGIC));
+        }
 
         _data_updated = true;
     }

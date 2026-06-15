@@ -66,6 +66,7 @@ MCU 的 `gpio_event_toggle()` 在本地状态上转换为 absolute low/high，�
 - `LogicSnapshot` 的 UART_VCD backend 仅保存真实边沿，内存与边沿数成正比。
 - decoder 在相邻边沿之间使用 constant channel，不再展开 24 MHz dense 数据。
 - 保存和导出仍会按块临时物化位图，使用后立即释放。
+- PC parser 遇到非法帧会打印错包、重新同步并继续采集。
 - DSL RLE 是 FPGA 侧能力，不能直接解决 UART_VCD Snapshot 内存。
 - UART_VCD 当前忽略 channel disable，默认按全部 32 通道存储。
 - 默认 profile 的 sample rate/decoder baud 可能与驱动常量漂移，修改配置时需

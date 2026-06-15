@@ -26,6 +26,8 @@
 #define UART_VCD_READ_BUF_SIZE          65536
 #define UART_VCD_EVENT_LIMIT            65536
 #define UART_VCD_DELTA_CLAMP            12000000
+#define UART_VCD_MAX_EVENT_SIZE         264
+#define UART_VCD_ERROR_DUMP_SIZE        32
 
 SR_PRIV struct sr_dev_driver uart_vcd_driver_info;
 static struct sr_dev_driver *di = &uart_vcd_driver_info;
@@ -104,6 +106,7 @@ static gboolean uart_fifo_push(struct uart_vcd_context *ctx, int channel,
     const uint8_t next = (ctx->uart_fifo_head[channel] + 1) & 0x3F;
     if (next == ctx->uart_fifo_tail[channel]) {
         ctx->uart_fifo_overflow = TRUE;
+        ctx->dropped_uart_bytes++;
         return FALSE;
     }
 
@@ -183,10 +186,16 @@ static void send_event_end(struct uart_vcd_context *ctx, const struct sr_dev_ins
         return;
 
     if (ctx->parsed_events || ctx->activity_mask) {
-        sr_info("final parsed=%llu, sample=%llu, activity=0x%08x",
+        sr_info("final parsed=%llu, sample=%llu, activity=0x%08x, "
+                "bad_packets=%llu, recovered=%llu, dropped_input=%llu, "
+                "dropped_uart=%llu",
                 (unsigned long long)ctx->parsed_events,
                 (unsigned long long)ctx->collected_samples,
-                ctx->activity_mask);
+                ctx->activity_mask,
+                (unsigned long long)ctx->bad_packets,
+                (unsigned long long)ctx->recovered_packets,
+                (unsigned long long)ctx->dropped_input_bytes,
+                (unsigned long long)ctx->dropped_uart_bytes);
     }
 
     flush_event_batch(ctx, sdi);
@@ -197,17 +206,141 @@ static void send_event_end(struct uart_vcd_context *ctx, const struct sr_dev_ins
     ctx->collecting=FALSE;
 }
 
-static void protocol_error(struct uart_vcd_context *ctx,
-                           const struct sr_dev_inst *sdi, const char *reason)
+static void protocol_error(struct uart_vcd_context *ctx, const char *reason,
+                           const uint8_t *data, uint64_t len)
 {
-    struct sr_datafeed_packet pkt;
+    char dump[UART_VCD_ERROR_DUMP_SIZE * 3 + 1];
+    uint64_t count = len;
+    uint64_t i;
 
-    sr_err("protocol framing error: %s", reason);
-    pkt.type=SR_DF_OVERFLOW;
-    pkt.status=SR_PKT_DATA_ERROR;
-    pkt.payload=NULL;
-    ds_data_forward(sdi,&pkt);
-    send_event_end(ctx, sdi);
+    if (count > UART_VCD_ERROR_DUMP_SIZE)
+        count = UART_VCD_ERROR_DUMP_SIZE;
+    for (i = 0; i < count; i++)
+        snprintf(dump + i * 3, sizeof(dump) - i * 3, "%02X ", data[i]);
+    dump[count * 3] = '\0';
+
+    ctx->bad_packets++;
+    ctx->dropped_input_bytes += len;
+    sr_err("bad MCU packet: %s; dropped=%llu; data=%s%s",
+           reason, (unsigned long long)len, dump,
+           len > count ? "..." : "");
+}
+
+static int ev2_frame_size(const struct uart_vcd_context *ctx,
+                          const uint8_t *p, int len)
+{
+    uint32_t delta_raw;
+    uint8_t header;
+
+    if (len < 4)
+        return 0;
+
+    delta_raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                ((uint32_t)p[2] << 16);
+    if (!ctx->first_event && delta_raw > UART_VCD_DELTA_CLAMP)
+        return -1;
+
+    header = p[3];
+    if (header & 0x80) {
+        int label_len = header & 0x1F;
+        int render_sub = (header >> 5) & 3;
+        int payload_onwire;
+        int payload_padded;
+        int frame_size;
+        int i;
+
+        if (render_sub > 1)
+            return -1;
+        if (len < 6)
+            return 0;
+        if (p[4] > 7 || p[5] < label_len)
+            return -1;
+
+        payload_onwire = 2 + p[5];
+        payload_padded = (payload_onwire + 3) & ~3;
+        frame_size = 4 + payload_padded;
+        if (frame_size > UART_VCD_MAX_EVENT_SIZE)
+            return -1;
+        if (len < frame_size)
+            return 0;
+
+        for (i = 4 + payload_onwire; i < frame_size; i++) {
+            if (p[i] != 0)
+                return -1;
+        }
+        return frame_size;
+    }
+
+    {
+        const uint8_t sub = (header >> 5) & 3;
+        const uint8_t channel = header & 0x1F;
+        if (sub > 2)
+            return -1;
+        if (channel > 23 && header != 0x1F)
+            return -1;
+    }
+    return 4;
+}
+
+static int ev2_headerless_string_size(const uint8_t *p, int len)
+{
+    int label_len;
+    int render_sub;
+    int payload_onwire;
+    int payload_padded;
+    int frame_size;
+    int i;
+
+    if (len < 1)
+        return 0;
+    if (!(p[0] & 0x80))
+        return -1;
+
+    label_len = p[0] & 0x1F;
+    render_sub = (p[0] >> 5) & 3;
+    if (render_sub > 1)
+        return -1;
+    if (len < 3)
+        return 0;
+    if (p[1] > 7 || p[2] < label_len)
+        return -1;
+
+    payload_onwire = 2 + p[2];
+    payload_padded = (payload_onwire + 3) & ~3;
+    frame_size = 1 + payload_padded;
+    if (frame_size > UART_VCD_MAX_EVENT_SIZE - 3)
+        return -1;
+    if (len < frame_size)
+        return 0;
+
+    for (i = 1 + payload_onwire; i < frame_size; i++) {
+        if (p[i] != 0)
+            return -1;
+    }
+    return frame_size;
+}
+
+static uint64_t ev2_resync_offset(const struct uart_vcd_context *ctx,
+                                  const uint8_t *p, uint64_t len)
+{
+    uint64_t offset;
+
+    for (offset = 1; offset < len; offset++) {
+        int frame_size = ev2_frame_size(ctx, p + offset, (int)(len - offset));
+
+        if (frame_size > 0 && (p[offset + 3] & 0x80))
+            return offset;
+    }
+
+    for (offset = 1; offset < len; offset++) {
+        int headerless_size = ev2_headerless_string_size(
+            p + offset, (int)(len - offset));
+        if (headerless_size > 0)
+            return offset;
+    }
+
+    return len > UART_VCD_MAX_EVENT_SIZE ?
+        len - UART_VCD_MAX_EVENT_SIZE : 0;
 }
 
 /* ─── Protocol v2 parser ─── */
@@ -215,16 +348,14 @@ static int ev2_blow_buf(struct uart_vcd_context *ctx, const struct sr_dev_inst *
                          const uint8_t *p, int len)
 {
     int pos=0;
-    if (len<4) return 0;
+    int frame_size = ev2_frame_size(ctx, p, len);
+    if (frame_size <= 0)
+        return frame_size;
 
     uint32_t delta_raw = (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16);
     uint64_t delta_samples = delta_raw;
     if (ctx->first_event) { ctx->first_event = FALSE; delta_samples = 1; }
     else if (delta_samples > ctx->total_samples) delta_samples = 1;
-    if (delta_samples > UART_VCD_DELTA_CLAMP) {
-        protocol_error(ctx, sdi, "delta exceeds configured maximum");
-        return 4;
-    }
 
     pos=3;
     uint8_t header = p[pos++];
@@ -232,16 +363,10 @@ static int ev2_blow_buf(struct uart_vcd_context *ctx, const struct sr_dev_inst *
     if (header & 0x80) {
         int label_len = header & 0x1F;
         int render_sub = (header>>5)&3;
-        if (len < pos+2) return 0;
         uint8_t ch_byte = p[pos++]; int channel = ch_byte;
         uint8_t total_len = p[pos++]; int data_len = (int)total_len - label_len;
-        if (render_sub > 1 || channel > 7 || data_len < 0) {
-            protocol_error(ctx, sdi, "invalid string header");
-            return pos;
-        }
         int payload_onwire = 2+total_len;
         int payload_padded = (payload_onwire+3)&~3;
-        if (len < pos+label_len+data_len+(payload_padded-payload_onwire)) return 0;
 
         {
             uint64_t target = ctx->collected_samples + delta_samples;
@@ -250,6 +375,7 @@ static int ev2_blow_buf(struct uart_vcd_context *ctx, const struct sr_dev_inst *
             uart_advance(ctx, sdi, target);
         }
         ctx->output_state |= (1u<<(24+channel));
+        ctx->uart_fifo_overflow = FALSE;
         {
             const uint8_t *src = p+pos; int d;
             for (d=0; d<label_len; d++) {
@@ -274,13 +400,9 @@ static int ev2_blow_buf(struct uart_vcd_context *ctx, const struct sr_dev_inst *
             { uart_start_byte(ctx, channel); ctx->uart_tx_active++; }
         record_state(ctx, sdi);
         if (ctx->uart_fifo_overflow) {
-            struct sr_datafeed_packet pkt;
-            sr_err("RX%d UART FIFO overflow", channel);
-            pkt.type=SR_DF_OVERFLOW;
-            pkt.status=SR_PKT_DATA_ERROR;
-            pkt.payload=NULL;
-            ds_data_forward(sdi,&pkt);
-            send_event_end(ctx, sdi);
+            sr_err("RX%d UART FIFO overflow: bytes dropped, acquisition continues",
+                   channel);
+            ctx->uart_fifo_overflow = FALSE;
         }
     } else {
         uint8_t sub = (header>>5)&3; int channel = header&0x1F;
@@ -315,7 +437,35 @@ static int ev2_blow_buf(struct uart_vcd_context *ctx, const struct sr_dev_inst *
 
     if (!ctx->is_loop && ctx->collected_samples >= ctx->total_samples)
         send_event_end(ctx, sdi);
-    return pos;
+    assert(pos == frame_size);
+    return frame_size;
+}
+
+static int ev2_recover_headerless_string(struct uart_vcd_context *ctx,
+                                         const struct sr_dev_inst *sdi,
+                                         const uint8_t *p, int len)
+{
+    uint8_t frame[UART_VCD_MAX_EVENT_SIZE];
+    int headerless_size = ev2_headerless_string_size(p, len);
+    int consumed;
+
+    if (headerless_size <= 0)
+        return headerless_size;
+
+    frame[0] = 0;
+    frame[1] = 0;
+    frame[2] = 0;
+    memcpy(frame + 3, p, (size_t)headerless_size);
+    consumed = ev2_blow_buf(ctx, sdi, frame, headerless_size + 3);
+    if (consumed <= 0)
+        return -1;
+
+    ctx->bad_packets++;
+    ctx->recovered_packets++;
+    sr_err("bad MCU packet: missing 3-byte delta before string header; "
+           "recovered=%d; data=%02X %02X %02X",
+           headerless_size, p[0], p[1], p[2]);
+    return headerless_size;
 }
 
 /* ─── TCP ─── */
@@ -512,6 +662,8 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     ctx->uart_fifo_overflow=FALSE;
     ctx->recorded_state=0xff000000u; ctx->activity_mask=0;
     ctx->activity_report_sample=0; ctx->parsed_events=0;
+    ctx->bad_packets=0; ctx->recovered_packets=0;
+    ctx->dropped_input_bytes=0; ctx->dropped_uart_bytes=0;
     ctx->gpio_state=0; ctx->output_state=0xff000000u;
     ctx->input_len=0; ctx->input_offset=0; ctx->event_count=0;
 
@@ -587,6 +739,29 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
                    ec < UART_VCD_EVENT_LIMIT) {
                 int c=ev2_blow_buf(ctx, sdi, ctx->input_buf + ctx->input_offset, (int)ctx->input_len);
                 if (c==0) break;
+                if (c < 0) {
+                    c = ev2_recover_headerless_string(ctx, sdi,
+                        ctx->input_buf + ctx->input_offset,
+                        (int)ctx->input_len);
+                    if (c > 0) {
+                        ctx->input_offset += c;
+                        ctx->input_len -= c;
+                        ec++;
+                        continue;
+                    }
+                    if (c == 0)
+                        break;
+
+                    uint64_t skip = ev2_resync_offset(ctx,
+                        ctx->input_buf + ctx->input_offset, ctx->input_len);
+                    if (!skip)
+                        break;
+                    protocol_error(ctx, "invalid framing",
+                        ctx->input_buf + ctx->input_offset, skip);
+                    ctx->input_offset += skip;
+                    ctx->input_len -= skip;
+                    continue;
+                }
                 ctx->input_offset += c;
                 ctx->input_len   -= c;
                 ec++;
@@ -608,14 +783,10 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
                 if (n == 0) break;
 
                 if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {
-                    sr_err("input overflow: %llu buffered bytes, stopping to preserve protocol framing",
-                           (unsigned long long)ctx->input_len);
-                    pkt.type=SR_DF_OVERFLOW;
-                    pkt.status=SR_PKT_DATA_ERROR;
-                    pkt.payload=NULL;
-                    ds_data_forward(sdi,&pkt);
-                    send_event_end(ctx, sdi);
-                    break;
+                    protocol_error(ctx, "input buffer overflow",
+                                   ctx->input_buf, ctx->input_len);
+                    ctx->input_len = 0;
+                    ctx->input_offset = 0;
                 }
 
                 memcpy(ctx->input_buf + ctx->input_len, read_buf, n);

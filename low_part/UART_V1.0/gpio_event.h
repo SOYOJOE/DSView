@@ -14,8 +14,8 @@
  * into the callers in app_dma.c.
  *
  * Usage:
- *   1. Implement user_critical_enter/exit, user_timer_ticks.
- *   2. Call main_loop() — encapsulates all hardware interaction.
+ *   1. Call gpio_event_init() after UART/DMA initialization.
+ *   2. Use gpio_event_irq_*() from GPIO interrupt handlers.
  */
 
 #ifndef GPIO_EVENT_H
@@ -42,12 +42,6 @@ enum {
 
 #include "common.h"
 
-/* ─── Required platform callbacks ─── */
-
-extern uint32_t user_timer_ticks(void);
-extern uint32_t user_critical_enter(void);
-extern void user_critical_exit(uint32_t state);
-
 /* ─── Entry points ─── */
 
 extern void user_init(void);
@@ -60,6 +54,17 @@ void gpio_event_reset_timer(void);
 void gpio_event_high(int channel);
 void gpio_event_low(int channel);
 void gpio_event_toggle(int channel);
+
+/*
+ * Interrupt-only fast path. These functions do no channel validation and must
+ * only be called with channel 0..23 from an ISR. Use one event-producing
+ * context: while these APIs are active, do not call regular GPIO/string or
+ * user_uart_* APIs. The main loop may keep calling uart_tx_poll().
+ */
+void gpio_event_irq_high(unsigned int channel);
+void gpio_event_irq_low(unsigned int channel);
+void gpio_event_irq_toggle(unsigned int channel);
+
 void gpio_event_send_string(int channel, int render_mode,
                             const uint8_t *label, int label_len,
                             const uint8_t *data,  int data_len);
