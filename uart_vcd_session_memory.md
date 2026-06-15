@@ -69,8 +69,8 @@ MCU 的 `gpio_event_toggle()` 在本地状态上转换为 absolute low/high，�
 - UART_VCD 当前忽略 channel disable，默认按全部 32 通道存储。
 - 默认 profile 的 sample rate/decoder baud 可能与驱动常量漂移，修改配置时需
   同时核对 `uart_vcd.h` 和 `DSView/res/uart-vcd0.def.dsc`。
-- `send_event_test.py` 和 `test_uart_vcd_event_protocol.md` 属于旧 varint
-  protocol，不能用于当前驱动。
+- `send_event_test.py` 是当前 protocol v2 TCP 测试服务器。
+- `test_uart_vcd_event_protocol.md` 仅保留旧 varint protocol 的废弃说明。
 
 ## 构建
 
