@@ -33,8 +33,6 @@ namespace pv {
 namespace data {
 namespace decode {
 
-std::mutex RowData::_global_visitor_mutex;
-
 RowData::RowData() :
     _max_annotation(0),
     _min_annotation(0)
@@ -49,7 +47,7 @@ RowData::~RowData()
 
 void RowData::clear()
 {
-    std::lock_guard<std::mutex> lock(_global_visitor_mutex);
+    std::lock_guard<std::mutex> lock(_visitor_mutex);
 
     //destroy objercts
     for (Annotation *p : _annotations){
@@ -62,7 +60,7 @@ void RowData::clear()
 
 uint64_t RowData::get_max_sample()
 {
-    std::lock_guard<std::mutex> lock(_global_visitor_mutex); 
+    std::lock_guard<std::mutex> lock(_visitor_mutex);
 
 	if (_annotations.empty())
 		return 0;
@@ -85,7 +83,7 @@ uint64_t RowData::get_min_annotation()
 void RowData::get_annotation_subset(std::vector<pv::data::decode::Annotation*> &dest,
 		                        uint64_t start_sample, uint64_t end_sample)
 {  
-    std::lock_guard<std::mutex> lock(_global_visitor_mutex);
+    std::lock_guard<std::mutex> lock(_visitor_mutex);
 
     for (Annotation *p : _annotations)
     {
@@ -98,7 +96,7 @@ void RowData::get_annotation_subset(std::vector<pv::data::decode::Annotation*> &
 
 uint64_t RowData::get_annotation_index(uint64_t start_sample)
 {
-    std::lock_guard<std::mutex> lock(_global_visitor_mutex);
+    std::lock_guard<std::mutex> lock(_visitor_mutex);
     uint64_t index = 0;
 
      for (Annotation *p : _annotations){
@@ -114,7 +112,7 @@ bool RowData::push_annotation(Annotation *a)
 { 
     assert(a);
 
-    std::lock_guard<std::mutex> lock(_global_visitor_mutex);
+    std::lock_guard<std::mutex> lock(_visitor_mutex);
 
     try {
       _annotations.push_back(a);
@@ -142,7 +140,7 @@ bool RowData::get_annotation(Annotation *ann, uint64_t index)
 {
     assert(ann);
 
-    std::lock_guard<std::mutex> lock(_global_visitor_mutex);
+    std::lock_guard<std::mutex> lock(_visitor_mutex);
 
     if (index < _annotations.size()) {
         *ann = *_annotations[index]; //clone

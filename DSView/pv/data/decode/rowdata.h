@@ -67,7 +67,7 @@ private:
     uint64_t        _min_annotation;
     uint64_t        _item_count;
 	std::vector<Annotation*> _annotations;
-    static std::mutex _global_visitor_mutex;
+    mutable std::mutex _visitor_mutex;
 };
 
 }

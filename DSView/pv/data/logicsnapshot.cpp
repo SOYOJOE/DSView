@@ -854,6 +854,12 @@ bool LogicSnapshot::get_sample(uint64_t index, int sig_index)
     return get_sample_unlock(index, sig_index);
 }
 
+bool LogicSnapshot::get_sample_no_lock(uint64_t index, int sig_index)
+{
+    assert(_loop_offset == 0);
+    return get_sample_self(index, sig_index);
+}
+
 bool LogicSnapshot::get_sample_unlock(uint64_t index, int sig_index)
 {
     index += _loop_offset;
@@ -960,6 +966,13 @@ bool LogicSnapshot::get_nxt_edge(uint64_t &index, bool last_sample, uint64_t end
 {
     std::lock_guard<std::mutex> lock(_mutex);
     return get_nxt_edge_unlock(index, last_sample, end, min_length, sig_index);
+}
+
+bool LogicSnapshot::get_nxt_edge_no_lock(uint64_t &index, bool last_sample,
+                      uint64_t end, double min_length, int sig_index)
+{
+    assert(_loop_offset == 0);
+    return get_nxt_edge_self(index, last_sample, end, min_length, sig_index);
 }
 
 bool LogicSnapshot::get_nxt_edge_unlock(uint64_t &index, bool last_sample, uint64_t end,
@@ -1580,6 +1593,17 @@ bool LogicSnapshot::pattern_search_self(int64_t start, int64_t end, int64_t &ind
 bool LogicSnapshot::has_data(int sig_index)
 {
     return get_ch_order(sig_index) != -1;
+}
+
+QString LogicSnapshot::enabled_channel_text() const
+{
+    QString text;
+    for (uint16_t index : _ch_index) {
+        if (!text.isEmpty())
+            text += ",";
+        text += QString::number(index);
+    }
+    return text;
 }
 
 int LogicSnapshot::get_block_num()

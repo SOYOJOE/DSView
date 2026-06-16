@@ -114,6 +114,8 @@ public:
 
     bool get_sample(uint64_t index, int sig_index);
 
+    bool get_sample_no_lock(uint64_t index, int sig_index);
+
     void capture_ended();
 
     bool get_display_edges(std::vector<std::pair<bool, bool>> &edges,
@@ -125,10 +127,14 @@ public:
     bool get_nxt_edge(uint64_t &index, bool last_sample, uint64_t end,
                       double min_length, int sig_index);
 
+    bool get_nxt_edge_no_lock(uint64_t &index, bool last_sample,
+                              uint64_t end, double min_length, int sig_index);
+
     bool get_pre_edge(uint64_t &index, bool last_sample,
                       double min_length, int sig_index);
 
     bool has_data(int sig_index);
+    QString enabled_channel_text() const;
     int get_block_num();
     uint64_t get_block_size(int block_index);
     uint8_t *get_block_buf(int block_index, int sig_index, bool &sample);

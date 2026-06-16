@@ -554,8 +554,10 @@ void DecodeTrace::on_new_decode_data()
 {
     decoded_progress(_decoder_stack->get_progress());
 
-    if (_view && _view->session().is_stopped_status())
-        _view->data_updated();
+    if (!_view)
+        return;
+
+    _view->data_updated();
     if (_totalHeight/_view->get_signalHeight() != rows_size())
         _view->signals_changed(NULL);
 }
