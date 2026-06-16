@@ -238,7 +238,41 @@ DSL 的 `SR_CONF_RLE` 是硬件/FPGA 采集能力。`dsl_start_transfers()` 将 
 
 ## 7. 当前实现和后续优化
 
-### 7.1 启用真实的通道开关
+### 7.1 已实现：loop sparse prune 节流
+
+loop mode 达到最大 sample 窗口后，旧边沿需要从 sparse edge vector 中淘汰。
+如果每个输入包都执行 `vector::erase()`，到 1.74 min 左右的最大 sample 后，
+CPU 会从正常采集占用突增到 100%，UI 停止响应。
+
+当前实现只在 `loop_offset` 至少推进约 1 秒 sample 后执行一次 sparse prune：
+
+```text
+prune_step = max(samplerate, LeafBlockSamples)
+```
+
+正常日志示例：
+
+```text
+DSView: LogicSnapshot sparse prune: loop_offset=... elapsed=... ms
+```
+
+这使 loop 5 s、10 s 以及超过最长采样窗口后的 CPU 占用保持稳定。
+
+### 7.2 已实现：采集中 defer native UART decode
+
+RX0-RX7 的字符串事件会被 PC 合成 8N1 UART 波形。如果采集同时运行 native
+UART decode，8 路 decoder 会和采集、UI、snapshot 写入抢 CPU，并且 UI 上的
+解释结果也要等解码结果进入对应 row 后才能显示。
+
+当前策略：
+
+- 采集进行中，native UART decode 直接返回 defer。
+- single/loop 停止或采集自然结束后，再对已有 sparse snapshot 做 native decode。
+- 解码线程仍可并行处理多个 RX 通道，但不会拖慢采集主路径。
+
+这适合当前 UART_VCD 的主要目标：先稳定采全量数据，再显示 UART 文本。
+
+### 7.3 启用真实的通道开关
 
 UART_VCD 当前对 `SR_CONF_PROBE_EN` 总是返回 true，并忽略 set。Snapshot
 只为 enabled channel 分配数据，因此支持关闭未使用通道可近似线性节省内存：
@@ -250,7 +284,7 @@ UART_VCD 当前对 `SR_CONF_PROBE_EN` 总是返回 true，并忽略 set。Snapsh
 这是低风险、低侵入的第一步，但 32 通道全开时没有收益。驱动输出布局必须
 同时改为只包含 enabled channel，否则 Snapshot 会按错误通道数解释 packet。
 
-### 7.2 限制 loop mode 时间窗口
+### 7.4 限制 loop mode 时间窗口
 
 现有 LogicSnapshot 已支持按 `total_samples` 循环释放旧 leaf block。设置
 固定保留时间可以把内存从持续增长变成固定上限：
@@ -263,7 +297,7 @@ UART_VCD 当前对 `SR_CONF_PROBE_EN` 总是返回 true，并忽略 set。Snapsh
 
 此方案不降低每秒写入带宽，但适合实时观察。
 
-### 7.3 Event-native sparse snapshot（已实现）
+### 7.5 Event-native sparse snapshot（已实现）
 
 protocol v2 本身已经是压缩事件流。最有效方案是让上层直接保存：
 
@@ -286,7 +320,50 @@ GPIO，压缩比可达到数千倍。
 因此采集和解码 CPU 应主要取决于 TCP 事件率及真实边沿率，而不再取决于
 24 MHz 虚拟采样率。
 
-### 7.4 Leaf block 常量状态压缩
+### 7.6 Protocol v2 评估
+
+当前 protocol v2 没有明显的 GPIO 编码问题。GPIO event 固定 4 bytes：
+
+```text
+uint24 delta + header(channel/sub-mode)
+```
+
+对 24 MHz timer 来说，1 ms delta 是 24,000 ticks，仍需要 3 bytes。改成
+varint 只能在更短 delta 下省 1-2 bytes，但会增加 MCU/PC 分支和重同步复杂度。
+因此在当前算力优先的前提下，GPIO fixed uint24 是合理折中。
+
+主要可优化点在 string/RX：
+
+- HEX render 会把每个 data byte 变成两个 ASCII 字符；能用 ASCII 时应优先用
+  ASCII。
+- 当前高频测试每个 RX event 都重复 `"lable:"`。如果 label 只在启动时作为
+  metadata 发送，后续 event 使用 `label_len=0`，可同时节省串口带宽、PC
+  事件解析和虚拟 UART 边沿。
+- `gpio_event_send_string()` 的 `total_len` 是 8-bit。调用方必须保证
+  `label_len + data_len <= 255`，且 `render_mode` 只能是 HEX/ASCII。否则会
+  出现长度回绕或 PC parser 拒帧。
+- PC 端每个 RX 通道的虚拟 UART FIFO 为 64 bytes。单个 string event 渲染后
+  超过 FIFO 或突发过快时，会丢 RX 字节并打印 overflow。
+
+在保持相同算力和带宽的情况下，优先级最高的是减少“要被合成并解码的 UART
+字符数”，而不是改 GPIO delta 编码。
+
+### 7.7 可选 v3 协议方向
+
+如果需要在相同 MCU 算力和物理带宽下继续提高上报量，建议新增可选 v3 event，
+并保留 v2 兼容模式：
+
+1. **Label dictionary / metadata**：每个 RX channel 的 label 只发送一次，后续
+   event 只带 data。
+2. **multi-string group**：同一 delta 下用 `rx_mask` 聚合 RX0-RX7 的多个
+   payload，避免重复 4-byte delta/header、channel/length 和 padding。
+3. **multi-GPIO mask**：同一 tick 多个 GPIO 同时变化时，用 `changed_mask`
+   和 `level_mask` 一次描述。24 路同时变化可从 96 bytes 降到约 10 bytes。
+4. **direct text annotation**：RX 字符串直接进入 annotation row，不再合成
+   8N1 波形，也不再运行 UART decoder。这是 PC CPU 收益最大的方案，但会牺牲
+   默认 bit-level UART 波形；可作为“文本优先模式”。
+
+### 7.8 Leaf block 常量状态压缩
 
 折中方案是在 `LogicSnapshot` 中将全 0/全 1 的 leaf block 表示为常量标记，
 仅在块内出现边沿时分配 2.03 MiB 数据。它能显著压缩长期静止的 GPIO，
@@ -298,8 +375,11 @@ GPIO，压缩比可达到数千倍。
 
 ## 8. 推荐顺序
 
-1. 对 0.2/2/3 Mbps TCP 输入分别实测 CPU、事件积压和停止延迟。
-2. 优化 loop mode 的边沿淘汰，避免频繁 `vector::erase()`。
-3. 评估真实 channel enable，减少无关 UI 和 decoder 工作。
-4. 不建议单独照搬 DSL 的 `SR_CONF_RLE`，因为 DSLogic 路径最终仍要求
+1. 保持当前 loop sparse prune 和采集中 defer native UART decode。
+2. MCU 侧约束 `label_len + data_len <= 255`、`render_mode <= 1`，避免无效帧。
+3. 高频字符串尽量用 ASCII，并减少重复 label。
+4. 评估真实 channel enable，减少无关 UI 和 decoder 工作。
+5. 若 RX0-RX7 文本量继续增长，优先做 direct text annotation 或 v3
+   multi-string group，而不是优先改 GPIO uint24 delta。
+6. 不建议单独照搬 DSL 的 `SR_CONF_RLE`，因为 DSLogic 路径最终仍要求
    dense sample data。

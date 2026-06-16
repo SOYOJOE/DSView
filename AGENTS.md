@@ -68,8 +68,9 @@ cmake --build cmake-build-debug-system-gcc13
 - ASCII mode: raw bytes
 - Per-ch 64B FIFO for UART TX bytes
 - `uart_tx_active` flag skips UART processing when idle (big perf win)
-- Per-callback limit: 786K samples / 512 events → yields to UI
+- Per-callback limit: 65,536 events → yields to UI
 - Per-event delta clamp: 12M samples max
+- Emits `LA_SPARSE_EVENTS`; it does not expand idle time into dense samples
 
 ### MCU firmware (`low_part/UART_V1.0/`)
 - **gpio_event.c**: protocol v2 encoder, only sends high/low (toggle converted locally)
@@ -99,11 +100,17 @@ cmake --build cmake-build-debug-system-gcc13
 - State drift on restart: MCU sends absolute high/low, never toggle
 - GPIO timing: delta emitted BEFORE state change (idle → then toggle)
 - Virtual RX UART: 6Mbaud at 24MHz = 4 samples/bit
+- Loop sparse prune is throttled, avoiding repeated `vector::erase()` when the
+  loop window reaches the max sample count
+- Native UART decode is deferred while capture is running; single/loop decode
+  runs after stop or acquisition end
 
 ### Memory model
 - `uart_vcd.c` forwards absolute-time `LA_SPARSE_EVENTS`; it does not expand idle time into dense samples
-- `LogicSnapshot` stores one bit per sample per enabled channel plus mipmaps
-- 32 channels at 24MHz consume about 97.5MB/s in `LogicSnapshot`
+- `LogicSnapshot` stores UART_VCD as sparse per-channel edges; memory follows
+  edge count, not 24MHz sample count
+- Dense 32-channel 24MHz storage would consume about 97.5MB/s; UART_VCD avoids
+  that path for normal capture
 - DSL `SR_CONF_RLE` is an FPGA acquisition feature and does not provide a
   compressed Snapshot representation
 

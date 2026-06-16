@@ -61,6 +61,20 @@ MCU 的 `gpio_event_toggle()` 在本地状态上转换为 absolute low/high，�
 | per-callback event limit | 65,536 |
 | per-event delta clamp | 12,000,000 |
 
+## 当前性能策略
+
+- 驱动向上提交 `LA_SPARSE_EVENTS`，采集阶段不再展开 24 MHz dense sample。
+- `LogicSnapshot` 对 UART_VCD 使用 sparse edge backend，内存和边沿数相关。
+- loop mode 到达最大 sample 窗口后，只按约 1 秒 sample 步长做 sparse prune，
+  避免每个包都 `vector::erase()` 导致 CPU 突增。
+- native UART decode 在采集进行中直接 defer，single/loop 停止或采集结束后再
+  解码，避免 8 路 RX 解码和采集/UI 主路径抢 CPU。
+- 正常 loop prune 会低频打印：
+
+```text
+DSView: LogicSnapshot sparse prune: loop_offset=... elapsed=... ms
+```
+
 ## 已知约束
 
 - `LogicSnapshot` 的 UART_VCD backend 仅保存真实边沿，内存与边沿数成正比。
@@ -73,6 +87,18 @@ MCU 的 `gpio_event_toggle()` 在本地状态上转换为 absolute low/high，�
   同时核对 `uart_vcd.h` 和 `DSView/res/uart-vcd0.def.dsc`。
 - `send_event_test.py` 是当前 protocol v2 TCP 测试服务器。
 - `test_uart_vcd_event_protocol.md` 仅保留旧 varint protocol 的废弃说明。
+
+## 协议注意点
+
+- GPIO event 固定 4 bytes，当前对 24 MHz delta + channel + high/low/toggle 来说
+  已经比较紧凑，主要瓶颈不在 GPIO event 编码。
+- 字符串 event 会在 PC 端合成 8N1 RX 波形，再由 UART decoder 解码成文本。
+  这保证了兼容现有 UI/decoder，但 CPU 和边沿数会随渲染字节数放大。
+- HEX render 会把每个 data byte 放大为两个 ASCII 字符；能用 ASCII 时优先用
+  ASCII，可直接减少 RX 边沿和后续解码工作。
+- MCU 当前 `gpio_event_send_string()` 使用 8-bit `total_len`。调用方必须保证
+  `label_len + data_len <= 255`，并且 `render_mode` 只能是 HEX/ASCII，否则 PC
+  parser 会拒绝或长度回绕。
 
 ## 构建
 
