@@ -1,8 +1,8 @@
 /*
- * gpio_event.h — MCU-side UART_VCD Event Protocol v2 encoder
+ * gpio_event.h — MCU-side UART_VCD Event Protocol v3 encoder
  *
  * 24MHz system clock, raw tick delta, fixed-size header encoding.
- * Compatible with DSView uart-vcd EVENT protocol v2 driver.
+ * Compatible with DSView uart-vcd EVENT protocol v3 driver.
  *
  * TX path uses two 4KB ping-pong DMA buffers for non-blocking transmission.
  *
@@ -65,9 +65,9 @@ void gpio_event_irq_high(unsigned int channel);
 void gpio_event_irq_low(unsigned int channel);
 void gpio_event_irq_toggle(unsigned int channel);
 
-void gpio_event_send_string(int channel, int render_mode,
-                            const uint8_t *label, int label_len,
-                            const uint8_t *data,  int data_len);
+void gpio_event_send_label(int channel, const uint8_t *label, int label_len);
+void gpio_event_send_text(int channel, int render_mode,
+                          const uint8_t *data, int data_len);
 void gpio_event_tx(void);
 
 /* ─── TX ring buffer API ─── */

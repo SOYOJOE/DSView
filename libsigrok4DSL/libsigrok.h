@@ -197,10 +197,11 @@ enum sr_datafeed_packet_type {
 	SR_DF_TRIGGER,
 	SR_DF_LOGIC,
     SR_DF_DSO,
-	SR_DF_ANALOG,
+    SR_DF_ANALOG,
 	SR_DF_FRAME_BEGIN,
 	SR_DF_FRAME_END,
     SR_DF_OVERFLOW,
+    SR_DF_UART_VCD_TEXT,
 };
 
 /** Values for sr_datafeed_analog.mq. */
@@ -398,6 +399,14 @@ struct sr_datafeed_logic {
     uint16_t data_error;
     uint64_t error_pattern;
 	void *data;
+};
+
+struct sr_datafeed_uart_vcd_text {
+    uint64_t start_sample;
+    uint64_t end_sample;
+    uint8_t channel;
+    uint8_t reserved[7];
+    const char *text;
 };
 
 struct sr_datafeed_dso {

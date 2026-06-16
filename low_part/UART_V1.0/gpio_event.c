@@ -1,7 +1,7 @@
 /*
- * gpio_event.c — UART_VCD Event Protocol v2 encoder + TX ring buffer + UART ISR
+ * gpio_event.c — UART_VCD Event Protocol v3 encoder + TX ring buffer + UART ISR
  *
- * Wire protocol:  [uint24_le delta_ticks][1B header][payload...]
+ * Wire protocol:  [0xA5][0x5A][uint24_le delta_ticks][1B header][payload...]
  * TX path:        ping-pong DMA ring buffer (4KB × 2)
  * Clock:          24MHz systimer ticks
  *
@@ -45,6 +45,11 @@ static int      g_initialized = 0;
 #define GPIO_LOW    0x00
 #define GPIO_HIGH   0x20
 #define GPIO_TOGGLE 0x40
+#define HEADER_LABEL       0x80
+#define HEADER_TEXT_HEX    0xC0
+#define HEADER_TEXT_ASCII  0xE0
+#define FRAME_MAGIC0       0xA5
+#define FRAME_MAGIC1       0x5A
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * ===  SECTION 1 — TX RING BUFFER (bottom of call chain, defined first) ====
@@ -70,24 +75,51 @@ static inline void uart_tx_write_byte(unsigned char byte)
     tx_buf[tx_wr_idx][tx_wr_pos++] = byte;
 }
 
-static inline void uart_tx_write_fast4(const uint8_t data[4])
+static inline void uart_tx_write_frame6(uint32_t dword)
 {
-    if (tx_wr_pos + 4 > TX_BUF_SIZE) {
+    uint8_t *p;
+
+    if (tx_wr_pos + 6 > TX_BUF_SIZE) {
         if (tx_dma_busy) return;
         tx_flush_one();
-        if (tx_wr_pos + 4 > TX_BUF_SIZE) return;
+        if (tx_wr_pos + 6 > TX_BUF_SIZE) return;
     }
-    *(uint32_t *)(tx_buf[tx_wr_idx] + tx_wr_pos) = *(const uint32_t *)data;
-    tx_wr_pos += 4;
+    p = tx_buf[tx_wr_idx] + tx_wr_pos;
+    p[0] = FRAME_MAGIC0;
+    p[1] = FRAME_MAGIC1;
+    p[2] = (uint8_t)dword;
+    p[3] = (uint8_t)(dword >> 8);
+    p[4] = (uint8_t)(dword >> 16);
+    p[5] = (uint8_t)(dword >> 24);
+    tx_wr_pos += 6;
 }
 
 static inline void __attribute__((always_inline))
-uart_tx_write_fast4_irq(uint32_t dword)
+uart_tx_write_frame6_irq(uint32_t dword)
 {
-    if (tx_buffer_lock || tx_wr_pos + 4 > TX_BUF_SIZE)
+    uint8_t *p;
+
+    if (tx_buffer_lock || tx_wr_pos + 6 > TX_BUF_SIZE)
         return;
-    *(uint32_t *)(tx_buf[tx_wr_idx] + tx_wr_pos) = dword;
-    tx_wr_pos += 4;
+    p = tx_buf[tx_wr_idx] + tx_wr_pos;
+    p[0] = FRAME_MAGIC0;
+    p[1] = FRAME_MAGIC1;
+    p[2] = (uint8_t)dword;
+    p[3] = (uint8_t)(dword >> 8);
+    p[4] = (uint8_t)(dword >> 16);
+    p[5] = (uint8_t)(dword >> 24);
+    tx_wr_pos += 6;
+}
+
+static inline uint8_t *write_frame_header(uint8_t *p, uint32_t dword)
+{
+    p[0] = FRAME_MAGIC0;
+    p[1] = FRAME_MAGIC1;
+    p[2] = (uint8_t)dword;
+    p[3] = (uint8_t)(dword >> 8);
+    p[4] = (uint8_t)(dword >> 16);
+    p[5] = (uint8_t)(dword >> 24);
+    return p + 6;
 }
 
 static inline uint8_t *uart_tx_reserve(unsigned int n)
@@ -152,8 +184,9 @@ gpio_event_emit(uint32_t new_state, uint8_t sub_mode, int channel)
     g_last_tick = now;
     g_gpio_state = new_state;
 
-    dword = delta | ((uint32_t)(sub_mode | (uint8_t)channel) << 24);
-    uart_tx_write_fast4((const uint8_t *)&dword);
+    dword = (delta & 0x00ffffffu) |
+        ((uint32_t)(sub_mode | (uint8_t)channel) << 24);
+    uart_tx_write_frame6(dword);
 }
 
 void gpio_event_high(int channel)
@@ -183,12 +216,12 @@ static inline void __attribute__((always_inline))
 gpio_event_emit_irq(uint32_t new_state, uint8_t sub_mode, unsigned int channel)
 {
     uint32_t now = stimer_get_tick();
-    uint32_t dword = (now - g_last_tick) |
+    uint32_t dword = ((now - g_last_tick) & 0x00ffffffu) |
         ((uint32_t)(sub_mode | (uint8_t)channel) << 24);
 
     g_last_tick = now;
     g_gpio_state = new_state;
-    uart_tx_write_fast4_irq(dword);
+    uart_tx_write_frame6_irq(dword);
 }
 
 _attribute_ram_code_sec_ void gpio_event_irq_high(unsigned int channel)
@@ -223,43 +256,71 @@ void gpio_event_reset_timer(void)
     g_last_tick = stimer_get_tick();
 }
 
-void gpio_event_send_string(int channel, int render_mode,
-                            const uint8_t *label, int label_len,
-                            const uint8_t *data,  int data_len)
+void gpio_event_send_label(int channel, const uint8_t *label, int label_len)
 {
-    uint32_t now, delta, dword;
-    uint8_t  header;
-    uint8_t  total_len;
+    uint32_t dword;
     int      payload_len, block_len;
     uint8_t *p;
 
     if (!g_initialized) return;
     if (channel < 0 || channel > 7) return;
-    if (label_len < 0 || label_len > 31) return;
-    if (data_len < 0) return;
+    if (label_len < 0 || label_len > 127) return;
+    if (label_len > 0 && label == 0) return;
+
+    dword = ((uint32_t)HEADER_LABEL << 24);
+
+    payload_len = 2 + label_len;
+    block_len   = (payload_len + 3) & ~3;
+
+    p = uart_tx_reserve((unsigned int)(6 + block_len));
+    if (p) {
+        p = write_frame_header(p, dword);
+        *p++ = (uint8_t)channel;
+        *p++ = (uint8_t)label_len;
+        if (label_len > 0) {
+            memcpy(p, label, (unsigned int)label_len);
+            p += label_len;
+        }
+        {
+            int pad = block_len - payload_len;
+            if (pad > 0) memset(p, 0, (unsigned int)pad);
+        }
+        uart_tx_commit((unsigned int)(6 + block_len));
+    }
+}
+
+void gpio_event_send_text(int channel, int render_mode,
+                          const uint8_t *data, int data_len)
+{
+    uint32_t now, delta, dword;
+    uint8_t  header;
+    int      payload_len, block_len;
+    uint8_t *p;
+
+    if (!g_initialized) return;
+    if (channel < 0 || channel > 7) return;
+    if (render_mode != GPIO_EVENT_RENDER_MODE_HEX &&
+        render_mode != GPIO_EVENT_RENDER_MODE_ASCII) return;
+    if (data_len < 0 || data_len > 255) return;
+    if (data_len > 0 && data == 0) return;
 
     now   = stimer_get_tick();
     delta = now - g_last_tick;
     g_last_tick = now;
 
-    header = 0x80 | ((uint8_t)(render_mode & 3) << 5) | (uint8_t)(label_len & 0x1F);
-    dword = delta | ((uint32_t)header << 24);
+    header = (render_mode == GPIO_EVENT_RENDER_MODE_HEX) ?
+        HEADER_TEXT_HEX : HEADER_TEXT_ASCII;
+    dword = (delta & 0x00ffffffu) | ((uint32_t)header << 24);
 
-    total_len   = (uint8_t)(label_len + data_len);
-    payload_len = 2 + total_len;
+    payload_len = 2 + data_len;
     block_len   = (payload_len + 3) & ~3;
 
-    p = uart_tx_reserve((unsigned int)(4 + block_len));
+    p = uart_tx_reserve((unsigned int)(6 + block_len));
     if (p) {
-        *(uint32_t *)p = dword;
-        p += 4;
+        p = write_frame_header(p, dword);
         *p++ = (uint8_t)channel;
-        *p++ = total_len;
-        if (label && label_len > 0) {
-            memcpy(p, label, (unsigned int)label_len);
-            p += label_len;
-        }
-        if (data && data_len > 0) {
+        *p++ = (uint8_t)data_len;
+        if (data_len > 0) {
             memcpy(p, data, (unsigned int)data_len);
             p += data_len;
         }
@@ -267,7 +328,7 @@ void gpio_event_send_string(int channel, int render_mode,
             int pad = block_len - payload_len;
             if (pad > 0) memset(p, 0, (unsigned int)pad);
         }
-        uart_tx_commit((unsigned int)(4 + block_len));
+        uart_tx_commit((unsigned int)(6 + block_len));
     }
 }
 

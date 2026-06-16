@@ -115,6 +115,7 @@ Annotation::Annotation(uint64_t start_sample, uint64_t end_sample, int format,
     _type = type;
     _resIndex = -1;
     _status = status;
+    _direct_annotations = annotations;
 
     std::string key;
     for (const QString &line : annotations) {
@@ -147,6 +148,9 @@ Annotation::~Annotation()
   
 const std::vector<QString>& Annotation::annotations() const
 {  
+     if (!_direct_annotations.empty())
+        return _direct_annotations;
+
 	 AnnotationSourceItem *pobj = _status->m_resTable.GetItem(_resIndex);	 
 	 assert(pobj);
 	
@@ -212,6 +216,9 @@ const std::vector<QString>& Annotation::annotations() const
 
 bool Annotation::is_numberic()
 {
+    if (!_direct_annotations.empty())
+        return false;
+
     AnnotationSourceItem *resItem = _status->m_resTable.GetItem(_resIndex);
 	return resItem->is_numeric;
 } 

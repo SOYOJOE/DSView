@@ -76,6 +76,7 @@ private:
 	short 			_type;
 	int 			_resIndex;
 	DecoderStatus 	*_status; /*a global variable*/
+    std::vector<QString> _direct_annotations;
 };
 
 } // namespace decode

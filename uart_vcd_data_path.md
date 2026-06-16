@@ -6,7 +6,7 @@ UART_VCD 使用事件协议，不再从串口接收每个采样点的 32-bit GPI
 
 ```text
 Telink MCU
-  -> protocol v2 event stream
+  -> protocol v3 event stream
   -> UART 3 Mbps
   -> low_part/bridge/serial_bridge.py
   -> TCP server :12345
@@ -22,32 +22,36 @@ Telink MCU
 | 通道 | 用途 |
 |---|---|
 | D0-D23 | GPIO high/low/toggle 事件 |
-| RX0-RX7 | 字符串事件在 PC 端合成的 8 路 UART RX 波形 |
+| RX0-RX7 | v3 direct text 直接显示 annotation，不生成 RX 波形 |
 
 MCU 的 24 MHz `stimer_get_tick()` 与 DSView 的 24 MHz sample 一一对应。
 
-## 2. Protocol v2
+## 2. Protocol v3
 
-每个事件以 3-byte little-endian delta tick 开头：
-
-```text
-[delta_ticks:3][header:1][optional payload]
-```
-
-GPIO 事件固定为 4 bytes：
+每个事件以 2-byte magic 加 3-byte little-endian delta tick 开头：
 
 ```text
-[delta:3][header:1]
+[0xA5][0x5A][delta_ticks:3][header:1][optional payload]
 ```
 
-字符串事件为：
+GPIO 事件固定为 6 bytes：
 
 ```text
-[delta:3][header:1][channel:1][total_len:1][label][data][padding]
+[0xA5][0x5A][delta:3][header:1]
 ```
 
-`channel` 范围为 0-7，对应 RX0-RX7。字符串 payload 从 `channel`
-开始按 4 bytes 对齐。完整定义见 `test_uart_vcd_event_protocol_2.md`。
+direct text 事件为：
+
+```text
+label: [0xA5][0x5A][delta:3][0x80][channel:1][label_len:1][label][padding]
+text:  [0xA5][0x5A][delta:3][0xC0/0xE0][channel:1][data_len:1][data][padding]
+```
+
+`A5 5A` 用于 PC 端重同步，避免 text payload 中的普通字节被误判为 GPIO
+事件。
+
+PC 端通过 `SR_DF_UART_VCD_TEXT` 直接推入 decoder annotation row，不再为
+RX0-RX7 合成 8N1 波形。完整定义见 `test_uart_vcd_event_protocol_v3.md`。
 
 ## 3. PC 端处理
 
@@ -70,18 +74,18 @@ GPIO 事件固定为 4 bytes：
 
 ### 3.2 事件调度
 
-`ev2_blow_buf()` 完成一个事件的解析：
+`ev3_blow_buf()` 完成一个事件的解析：
 
-1. 读取 24-bit delta。
+1. 校验 `A5 5A` sync word，读取 24-bit delta。
 2. 将绝对采样时间推进 delta，但不生成空闲采样。
 3. GPIO 事件再更新 GPIO 状态。
-4. 字符串事件加入对应 RX 通道的 64-byte FIFO。
+4. text 事件直接发送 `SR_DF_UART_VCD_TEXT` annotation packet。
 
 首事件 delta 被替换为 1 sample，异常大 delta 会被限制：
 
 | 限制 | 当前值 |
 |---|---:|
-| 单事件最大 delta | 12,000,000 samples |
+| 单事件最大 delta | 16,777,215 samples |
 | 单回调最大事件数 | 65,536 |
 
 event-native backend 不再按虚拟采样数限制单次回调。旧的 3,145,728 sample
@@ -102,8 +106,8 @@ python3 send_event_test.py gpio-frequency \
   --wire-mbps 2.1
 ```
 
-GPIO 每通道每秒 toggle 1,000 次，并同时让 RX0-RX7 每毫秒发送与固件一致的
-11-byte string payload（`"lable:"` 6 bytes + data 5 bytes）：
+GPIO 每通道每秒 toggle 1,000 次，并同时让 RX0-RX7 每毫秒发送 5-byte
+direct text payload：
 
 ```bash
 python3 send_event_test.py gpio-uart-1k \
@@ -113,47 +117,24 @@ python3 send_event_test.py gpio-uart-1k \
 该场景每毫秒固定产生 256 bytes protocol payload：
 
 ```text
-24 GPIO events * 4 bytes + 8 UART events * 20 bytes = 256 bytes/ms
+24 GPIO events * 6 bytes + 8 text events * 14 bytes = 256 bytes/ms
 ```
 
 即 2.048 Mbps TCP payload；如果按物理 8N1 串口计算，需要 2.56 Mbaud。
-RX0-RX3 使用 HEX render，最终各生成 16 个虚拟 UART 字符；RX4-RX7 使用
-ASCII render，各生成 11 个虚拟 UART 字符。
-驱动每 0.25 秒逻辑时间输出一次 `activity` 掩码。正常复合测试应为
-`activity=0xffffffff`，否则可直接定位是 GPIO 还是 RX 通道未产生边沿。
+驱动每 0.25 秒逻辑时间输出一次 `activity` 掩码。v3 direct text 不再生成
+RX0-RX7 波形，所以正常复合测试的 GPIO activity 应为 `0x00ffffff`；RX 文本
+是否进入 UI 需要看 `uart_vcd text annotation...` 日志。
 
-解析器会校验事件 header、字符串长度和对齐 padding。收到非法帧时打印原始
+解析器会校验事件 header、文本长度和对齐 padding。收到非法帧时打印原始
 十六进制数据，向后寻找可连续解析的事件边界，丢弃错帧后继续采集。RX FIFO
 或输入缓冲溢出也只报告并丢弃受影响的数据，不再发送会终止 UI 会话的
 `SR_DF_OVERFLOW`。
 
-重新同步优先使用完整 string event 作为强边界。若 MCU 数据中只缺少 string
-event 的 3-byte delta，但 header、payload 和 padding 完整，PC 会使用零 delta
-恢复该字符串并继续解析；无法确定边界的 GPIO 字节不会被猜测为有效事件。
+重新同步优先使用完整 label/text event 作为强边界。
 
 稀疏事件包的 UI 接收进度按 `LogicSnapshot` 实际增加的 sample 数计算，不再
 把 16-byte sparse record 错当成普通 32 通道位图数据。
-### 3.3 RX0-RX7 UART 合成
-
-每个字符生成标准 8N1 波形：
-
-```text
-start(0) + 8 data bits LSB-first + stop(1)
-```
-
-当前虚拟 UART 波特率为：
-
-```text
-UART_VCD_UART_BAUD_RATE = 24 MHz / 4 = 6 Mbaud
-```
-
-因此每 bit 为 4 samples。物理 MCU 到 bridge 的 3 Mbps UART 与这里的
-虚拟 6 Mbaud 波形是两个独立参数。
-
-HEX 模式将一个 data byte 转成两个大写 ASCII hex 字符；ASCII 模式直接
-发送 data byte。label 始终作为 ASCII 字节发送。
-
-### 3.4 LA_SPARSE_EVENTS 输出
+### 3.3 LA_SPARSE_EVENTS 输出
 
 驱动向 Session 提交事件记录：
 
@@ -258,19 +239,11 @@ DSView: LogicSnapshot sparse prune: loop_offset=... elapsed=... ms
 
 这使 loop 5 s、10 s 以及超过最长采样窗口后的 CPU 占用保持稳定。
 
-### 7.2 已实现：采集中 defer native UART decode
+### 7.2 已实现：v3 direct text
 
-RX0-RX7 的字符串事件会被 PC 合成 8N1 UART 波形。如果采集同时运行 native
-UART decode，8 路 decoder 会和采集、UI、snapshot 写入抢 CPU，并且 UI 上的
-解释结果也要等解码结果进入对应 row 后才能显示。
-
-当前策略：
-
-- 采集进行中，native UART decode 直接返回 defer。
-- single/loop 停止或采集自然结束后，再对已有 sparse snapshot 做 native decode。
-- 解码线程仍可并行处理多个 RX 通道，但不会拖慢采集主路径。
-
-这适合当前 UART_VCD 的主要目标：先稳定采全量数据，再显示 UART 文本。
+RX0-RX7 文本事件直接进入 annotation row，不再合成 8N1 波形，也不再运行
+UART decoder。UART decoder stack 仅作为当前 UI 的 annotation row 容器，decode
+worker 会直接跳过，避免停止采集后清空 direct annotations。
 
 ### 7.3 启用真实的通道开关
 
@@ -299,11 +272,11 @@ UART_VCD 当前对 `SR_CONF_PROBE_EN` 总是返回 true，并忽略 set。Snapsh
 
 ### 7.5 Event-native sparse snapshot（已实现）
 
-protocol v2 本身已经是压缩事件流。最有效方案是让上层直接保存：
+protocol v3 本身已经是压缩事件流。最有效方案是让上层直接保存：
 
 ```text
 GPIO: (sample_index, new_level)
-RX:   (sample_index, byte stream/render mode)
+RX:   (sample_index, direct text annotation)
 ```
 
 波形绘制可直接从边沿列表生成，内存取决于事件数量而不是采样率。对于长空闲
@@ -320,38 +293,48 @@ GPIO，压缩比可达到数千倍。
 因此采集和解码 CPU 应主要取决于 TCP 事件率及真实边沿率，而不再取决于
 24 MHz 虚拟采样率。
 
-### 7.6 Protocol v2 评估
+### 7.6 Protocol v3 评估
 
-当前 protocol v2 没有明显的 GPIO 编码问题。GPIO event 固定 4 bytes：
+当前 protocol v3 的 GPIO event 固定 6 bytes：
 
 ```text
-uint24 delta + header(channel/sub-mode)
+magic16 + uint24 delta + header(channel/sub-mode)
 ```
 
 对 24 MHz timer 来说，1 ms delta 是 24,000 ticks，仍需要 3 bytes。改成
 varint 只能在更短 delta 下省 1-2 bytes，但会增加 MCU/PC 分支和重同步复杂度。
 因此在当前算力优先的前提下，GPIO fixed uint24 是合理折中。
 
-主要可优化点在 string/RX：
+主要可优化点在 text/RX：
 
 - HEX render 会把每个 data byte 变成两个 ASCII 字符；能用 ASCII 时应优先用
   ASCII。
-- 当前高频测试每个 RX event 都重复 `"lable:"`。如果 label 只在启动时作为
-  metadata 发送，后续 event 使用 `label_len=0`，可同时节省串口带宽、PC
-  事件解析和虚拟 UART 边沿。
-- `gpio_event_send_string()` 的 `total_len` 是 8-bit。调用方必须保证
-  `label_len + data_len <= 255`，且 `render_mode` 只能是 HEX/ASCII。否则会
-  出现长度回绕或 PC parser 拒帧。
-- PC 端每个 RX 通道的虚拟 UART FIFO 为 64 bytes。单个 string event 渲染后
-  超过 FIFO 或突发过快时，会丢 RX 字节并打印 overflow。
+- label 只在启动时作为 metadata 发送，后续 text event 只带 data。
+- `gpio_event_send_text()` 的 `data_len` 是 8-bit，单帧 data 最大 255 bytes。
 
-在保持相同算力和带宽的情况下，优先级最高的是减少“要被合成并解码的 UART
-字符数”，而不是改 GPIO delta 编码。
+在保持相同算力和带宽的情况下，优先级最高的是减少 text payload 字节数，
+而不是改 GPIO delta 编码。
 
-### 7.7 可选 v3 协议方向
+### 7.7 v3 direct text（已实现最小闭环）
 
-如果需要在相同 MCU 算力和物理带宽下继续提高上报量，建议新增可选 v3 event，
-并保留 v2 兼容模式：
+当前已实现：
+
+- MCU `gpio_event_send_label()` / `gpio_event_send_text()`。
+- PC `ev3_blow_buf()` 解析 `0x80` label、`0xC0` HEX text、`0xE0` ASCII text。
+- 新增 `SR_DF_UART_VCD_TEXT`，由 `SigSession` 按 RX channel 路由到对应
+  decoder stack。
+- direct annotation UI 刷新按 256 条节流。
+- v2 parser 已删除；v3 是唯一支持协议。
+
+未实现：
+
+- mode 2 multi-GPIO mask。
+- v3 专用 TCP 测试发送器。
+- 不依赖 UART decoder 的专用 text row。
+
+### 7.8 可选 v3 后续方向
+
+如果需要在相同 MCU 算力和物理带宽下继续提高上报量，建议新增可选 v3 event：
 
 1. **Label dictionary / metadata**：每个 RX channel 的 label 只发送一次，后续
    event 只带 data。
@@ -359,24 +342,21 @@ varint 只能在更短 delta 下省 1-2 bytes，但会增加 MCU/PC 分支和重
    payload，避免重复 4-byte delta/header、channel/length 和 padding。
 3. **multi-GPIO mask**：同一 tick 多个 GPIO 同时变化时，用 `changed_mask`
    和 `level_mask` 一次描述。24 路同时变化可从 96 bytes 降到约 10 bytes。
-4. **direct text annotation**：RX 字符串直接进入 annotation row，不再合成
-   8N1 波形，也不再运行 UART decoder。这是 PC CPU 收益最大的方案，但会牺牲
-   默认 bit-level UART 波形；可作为“文本优先模式”。
+4. **专用 text row**：替代借用 UART decoder stack 作为 annotation row 容器。
 
-### 7.8 Leaf block 常量状态压缩
+### 7.9 Leaf block 常量状态压缩
 
 折中方案是在 `LogicSnapshot` 中将全 0/全 1 的 leaf block 表示为常量标记，
 仅在块内出现边沿时分配 2.03 MiB 数据。它能显著压缩长期静止的 GPIO，
 且保留现有查询接口。
 
 限制是当前写入过程会在 leaf block 尚未完成时立即分配 dense buffer。要获得
-收益，需要增加按块事件构建或延迟物化机制。RX 通道持续产生串行边沿时仍会
-使用完整块。
+收益，需要增加按块事件构建或延迟物化机制。
 
 ## 8. 推荐顺序
 
-1. 保持当前 loop sparse prune 和采集中 defer native UART decode。
-2. MCU 侧约束 `label_len + data_len <= 255`、`render_mode <= 1`，避免无效帧。
+1. 保持当前 loop sparse prune 和 v3 direct text。
+2. MCU 侧约束 `data_len <= 255`、`render_mode <= 1`，避免无效帧。
 3. 高频字符串尽量用 ASCII，并减少重复 label。
 4. 评估真实 channel enable，减少无关 UI 和 decoder 工作。
 5. 若 RX0-RX7 文本量继续增长，优先做 direct text annotation 或 v3

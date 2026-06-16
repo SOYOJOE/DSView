@@ -23,6 +23,7 @@
 #include <libsigrokdecode.h>
 #include "../dsvdef.h" 
 #include <boost/functional/hash.hpp>
+#include <cstring>
 #include <QAction> 
 #include <QFormLayout>
 #include <QLabel>
@@ -242,10 +243,19 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
     uint64_t end_sample = (uint64_t)max((right + pixels_offset) *
         samples_per_pixel, 0.0);
 
-    for(auto dec : _decoder_stack->stack()) {
-        start_sample = max(dec->decode_start(), start_sample);
-        end_sample = min(dec->decode_end(), end_sample);
-        break;
+    const char *root_decoder_id = NULL;
+    if (!_decoder_stack->stack().empty() &&
+        _decoder_stack->stack().front()->decoder())
+        root_decoder_id = _decoder_stack->stack().front()->decoder()->id;
+    const bool direct_text_stack = root_decoder_id &&
+        strcmp(root_decoder_id, "0:uart") == 0;
+
+    if (!direct_text_stack) {
+        for(auto dec : _decoder_stack->stack()) {
+            start_sample = max(dec->decode_start(), start_sample);
+            end_sample = min(dec->decode_end(), end_sample);
+            break;
+        }
     }
 
     if (end_sample < start_sample)
@@ -276,8 +286,12 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
                         const uint64_t max_annotation =
                                 _decoder_stack->get_max_annotation(row);
                         const double max_annWidth = max_annotation / samples_per_pixel;
+                        const bool direct_text_row = row.decoder() &&
+                            row.decoder()->id &&
+                            strcmp(row.decoder()->id, "0:uart") == 0;
                         
-                        if ((max_annWidth > 100) ||
+                        if (direct_text_row ||
+                            (max_annWidth > 100) ||
                             (max_annWidth > 10 && (min_annWidth > 1 || samples_per_pixel < 50)) ||
                             (max_annWidth == 0 && samples_per_pixel < 10)) {
                             std::vector<Annotation*> annotations;
@@ -330,8 +344,9 @@ void DecodeTrace::draw_annotation(const pv::data::decode::Annotation &a,
 {
     const double start = max(a.start_sample() / samples_per_pixel -
         pixels_offset, (double)left);
-    const double end = min(a.end_sample() / samples_per_pixel -
+    double end = min(a.end_sample() / samples_per_pixel -
         pixels_offset, (double)right);
+    const bool direct_text = a.type() == 1008;
 
     const size_t colour = ((base_colour + a.type()) % MaxAnnType) % countof(Colours);
 	const QColor &fill = Colours[colour];
@@ -341,11 +356,24 @@ void DecodeTrace::draw_annotation(const pv::data::decode::Annotation &a,
 		return;
     }
 
-    if (end - last_x <= 0.5 && end - start < 1){
-        return;
+    if (direct_text) {
+        const QString text = a.annotations().empty() ?
+            QString() : a.annotations().back();
+        const double min_width = min(max((double)p.boundingRect(QRectF(), 0, text).width() + h,
+                                         48.0),
+                                     180.0);
+        if (end - start < min_width)
+            end = min(start + min_width, (double)right);
+        if (start < last_x + 4)
+            return;
+        last_x = end;
+    } else {
+        if (end - last_x <= 0.5 && end - start < 1){
+            return;
+        }
+
+        last_x = end;
     }
-    
-    last_x = end;
 
     if (_decoder_stack->get_mark_index() == (int64_t)(a.start_sample()+ a.end_sample())/2) {
         p.setPen(View::Blue);

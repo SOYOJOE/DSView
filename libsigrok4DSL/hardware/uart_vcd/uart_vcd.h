@@ -21,11 +21,8 @@
 #define UART_VCD_EVENT_SAMPLERATE_DEFAULT  24000000
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
 #define UART_VCD_MAX_HW_DEPTH             SR_Mn(2500)
-#define UART_VCD_UART_BAUD_RATE      (UART_VCD_EVENT_SAMPLERATE_DEFAULT/4)
-#define UART_VCD_PROTOCOL_RAW        0
-#define UART_VCD_PROTOCOL_EVENT      1
-#define UART_VCD_DEFAULT_PROTOCOL    UART_VCD_PROTOCOL_EVENT
 #define UART_VCD_EVENT_BATCH_SIZE    4096
+#define UART_VCD_MAX_LABEL_LEN       128
 
 struct uart_vcd_context {
     int        tcp_fd;
@@ -44,7 +41,6 @@ struct uart_vcd_context {
     uint64_t   input_offset;
     struct sr_logic_sparse_event *event_buf;
     uint32_t   event_count;
-    int        protocol;
     uint32_t   gpio_state;
     uint32_t   output_state;
     uint32_t   recorded_state;
@@ -54,16 +50,8 @@ struct uart_vcd_context {
     uint64_t   bad_packets;
     uint64_t   recovered_packets;
     uint64_t   dropped_input_bytes;
-    uint64_t   dropped_uart_bytes;
-    uint8_t    uart_tx_data[8];
-    int8_t     uart_tx_bit[8];
-    int8_t     uart_tx_samp_per_bit;
-    uint64_t   uart_tx_next_sample[8];
-    uint8_t    uart_fifo[8][64];
-    uint8_t    uart_fifo_head[8];
-    uint8_t    uart_fifo_tail[8];
-    int        uart_tx_active;
-    gboolean   uart_fifo_overflow;
+    char       labels[8][UART_VCD_MAX_LABEL_LEN];
+    gboolean   labels_received[8];
 };
 
 static const uint64_t uart_vcd_samplerates[] = { 24000000 };

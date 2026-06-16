@@ -21,6 +21,7 @@
  */
 
 #include <libsigrokdecode.h>
+#include <cstring>
 
 #include "sigsession.h"
 #include "mainwindow.h"
@@ -1258,6 +1259,48 @@ namespace pv
         _data_updated = true;
     }
 
+    void SigSession::feed_in_uart_vcd_text(const sr_datafeed_uart_vcd_text &o)
+    {
+        if (o.channel >= 8 || o.text == NULL) {
+            dsv_info("uart_vcd text annotation dropped: channel=%u text=%p",
+                     (unsigned int)o.channel, (const void*)o.text);
+            return;
+        }
+
+        const int target_probe = 24 + (int)o.channel;
+        const uint64_t start = o.start_sample;
+        const uint64_t end = o.end_sample > o.start_sample ?
+            o.end_sample : o.start_sample + 1;
+        const QString text = QString::fromUtf8(o.text);
+
+        for (auto trace : _decode_traces) {
+            if (trace == NULL || trace->decoder() == NULL)
+                continue;
+
+            data::DecoderStack *stack = trace->decoder();
+            if (stack->stack().empty())
+                continue;
+
+            data::decode::Decoder *dec = stack->stack().front();
+            if (dec == NULL || dec->first_probe_index() != target_probe)
+                continue;
+
+            stack->push_direct_annotation(start, end, 0, 1008, {text});
+            if (stack->get_result_count() == 1 ||
+                (stack->get_result_count() & 0x3ff) == 0) {
+                dsv_info("uart_vcd text annotation: channel=%u count=%llu sample=%llu text=%s",
+                         (unsigned int)o.channel,
+                         (unsigned long long)stack->get_result_count(),
+                         (unsigned long long)o.start_sample, o.text);
+            }
+            return;
+        }
+
+        dsv_info("uart_vcd text annotation dropped: channel=%u sample=%llu text=%s",
+                 (unsigned int)o.channel,
+                 (unsigned long long)o.start_sample, o.text);
+    }
+
     void SigSession::feed_in_dso(const sr_datafeed_dso &o)
     {
         if (_capture_data->get_dso()->memory_failed())
@@ -1433,6 +1476,12 @@ namespace pv
         case SR_DF_LOGIC:
             assert(packet->payload);
             feed_in_logic(*(const sr_datafeed_logic *)packet->payload);
+            break;
+
+        case SR_DF_UART_VCD_TEXT:
+            assert(packet->payload);
+            feed_in_uart_vcd_text(
+                *(const sr_datafeed_uart_vcd_text *)packet->payload);
             break;
 
         case SR_DF_DSO:
@@ -2263,7 +2312,7 @@ namespace pv
 
                     if (bAddDecoder){
                         clear_all_decode_task2();
-                        clear_decode_result();
+                        clear_decode_result(true);
                     }
 
                     _trig_check_timer.Stop();
@@ -2384,9 +2433,15 @@ namespace pv
         return false;    
     }
 
-    void SigSession::clear_decode_result()
+    void SigSession::clear_decode_result(bool preserve_uart_vcd_text)
     {
         for (auto de : _decode_traces){
+            if (preserve_uart_vcd_text &&
+                de->decoder()->get_root_decoder_id() &&
+                strcmp(de->decoder()->get_root_decoder_id(), "0:uart") == 0) {
+                de->decoder()->set_capture_end_flag(false);
+                continue;
+            }
             de->decoder()->init();
             de->decoder()->set_capture_end_flag(false);
         }
