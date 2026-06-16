@@ -171,7 +171,61 @@ LOG:
 ## 6. Validation rules
 
 - Reject or ignore GPIO channels above 23.
-- String channel is interpreted as `channel & 7` by the current PC parser.
-- If `total_len < label_len`, current PC code treats `data_len` as zero.
+- Reject string channels above 7.
+- Reject string events whose `total_len < label_len`.
+- Reject reserved string render sub-modes 2 and 3.
+- Reject non-zero string padding bytes.
+- Reject string frames larger than 264 bytes after padding.
 - The uint24 delta wraps naturally on the MCU; the PC clamps abnormal deltas.
 - No end-of-stream marker exists. Acquisition ends by sample limit or user stop.
+
+## 7. Current protocol assessment
+
+Protocol v2 is suitable for the current 1 ms reporting target. GPIO events are
+already compact: one 24 MHz delta and one header byte per edge. For independent
+GPIO edges, a varint delta would only save bandwidth when deltas are below
+65536 ticks, and it would add MCU/PC branch cost and weaker resync behavior.
+
+The main cost is string rendering. A string event is first transported as bytes,
+then expanded by the PC into 8N1 RX edges, then decoded again by the UART
+decoder. This is compatible with existing DSView UART rows, but it means the
+effective CPU cost follows rendered UART characters, not only wire bytes.
+
+Current MCU call sites must keep these invariants:
+
+```text
+0 <= channel <= 7
+0 <= label_len <= 31
+0 <= label_len + data_len <= 255
+render_mode is HEX(0) or ASCII(1)
+```
+
+If `label_len + data_len` exceeds 255, the current MCU encoder's 8-bit
+`total_len` would wrap before sending. If `render_mode` is 2 or 3, the PC parser
+rejects the frame. These are protocol-use bugs rather than parser bugs.
+
+## 8. Optimization options
+
+Use ASCII render whenever the payload is printable text. HEX render doubles
+data bytes before the virtual UART waveform is generated.
+
+Avoid repeating labels in every high-rate string event. For the current 1 kHz
+RX0-RX7 test, `"lable:"` is sent and rendered every event. Sending the label
+only once as metadata, or using `label_len = 0` after startup, saves fixed
+payload and virtual UART work on every report.
+
+A future v3 protocol can pack same-timestamp data:
+
+```text
+multi-GPIO:   [delta][type][changed_mask][level_mask]
+multi-string: [delta][type][rx_mask][len0][data0]...[lenN][dataN]
+```
+
+This helps when many D0-D23 channels or RX0-RX7 channels report at the same
+tick. It is less useful for sparse, unrelated edges.
+
+The largest CPU reduction would be a direct text-annotation path for RX0-RX7:
+store `(sample, channel, text)` and render annotations directly, without
+synthesizing 8N1 waveform and without running the UART decoder. Keep virtual
+UART waveform generation as an optional compatibility mode when bit-level RX
+inspection is needed.

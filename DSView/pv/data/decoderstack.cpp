@@ -24,6 +24,9 @@
 #include <stdexcept>
 #include <algorithm>
 #include <assert.h>
+#include <chrono>
+#include <cmath>
+#include <cstring>
 
 #include "decoderstack.h"
 #include "logicsnapshot.h"
@@ -43,6 +46,90 @@ using namespace boost;
 
 namespace pv {
 namespace data {
+
+static std::mutex srd_session_mutex;
+
+static int variant_to_int(GVariant *value, int default_value)
+{
+    if (value == NULL)
+        return default_value;
+
+    const GVariantClass klass = g_variant_classify(value);
+    switch (klass) {
+    case G_VARIANT_CLASS_BYTE:
+        return g_variant_get_byte(value);
+    case G_VARIANT_CLASS_INT16:
+        return g_variant_get_int16(value);
+    case G_VARIANT_CLASS_UINT16:
+        return g_variant_get_uint16(value);
+    case G_VARIANT_CLASS_INT32:
+        return g_variant_get_int32(value);
+    case G_VARIANT_CLASS_UINT32:
+        return g_variant_get_uint32(value);
+    case G_VARIANT_CLASS_INT64:
+        return (int)g_variant_get_int64(value);
+    case G_VARIANT_CLASS_UINT64:
+        return (int)g_variant_get_uint64(value);
+    case G_VARIANT_CLASS_DOUBLE:
+        return (int)g_variant_get_double(value);
+    default:
+        return default_value;
+    }
+}
+
+static double variant_to_double(GVariant *value, double default_value)
+{
+    if (value == NULL)
+        return default_value;
+
+    const GVariantClass klass = g_variant_classify(value);
+    switch (klass) {
+    case G_VARIANT_CLASS_DOUBLE:
+        return g_variant_get_double(value);
+    case G_VARIANT_CLASS_INT32:
+        return g_variant_get_int32(value);
+    case G_VARIANT_CLASS_UINT32:
+        return g_variant_get_uint32(value);
+    case G_VARIANT_CLASS_INT64:
+        return (double)g_variant_get_int64(value);
+    case G_VARIANT_CLASS_UINT64:
+        return (double)g_variant_get_uint64(value);
+    default:
+        return default_value;
+    }
+}
+
+static const char *variant_to_string(GVariant *value, const char *default_value)
+{
+    if (value == NULL || !g_variant_is_of_type(value, G_VARIANT_TYPE_STRING))
+        return default_value;
+    return g_variant_get_string(value, NULL);
+}
+
+static QString native_uart_text(uint32_t value, int data_bits, const char *format)
+{
+    if (strcmp(format, "ascii") == 0) {
+        if (value >= 0x20 && value <= 0x7e)
+            return QString(QChar((char)value));
+        if (value == '\r')
+            return QString("\\r");
+        if (value == '\n')
+            return QString("\\n");
+        if (value == '\t')
+            return QString("\\t");
+        if (value == 0)
+            return QString("\\0");
+        return QString("\\x%1").arg(value, 2, 16, QChar('0')).toUpper();
+    }
+    if (strcmp(format, "dec") == 0)
+        return QString::number(value);
+    if (strcmp(format, "oct") == 0)
+        return QString::number(value, 8);
+    if (strcmp(format, "bin") == 0)
+        return QString::number(value, 2).rightJustified(data_bits, QChar('0'));
+
+    return QString("@%1").arg(value, 2, 16, QChar('0')).toUpper();
+}
 
 const double DecoderStack::DecodeMargin = 1.0;
 const double DecoderStack::DecodeThreshold = 0.2;
@@ -485,7 +572,12 @@ void DecoderStack::do_decode_work()
         return;
     }
      
-    execute_decode_stack();   
+    dsv_info("DecoderStack::do_decode_work root=%s stack=%u options_changed=1",
+             get_root_decoder_id() ? get_root_decoder_id() : "NULL",
+             (unsigned int)_stack.size());
+
+    if (!execute_native_uart_decode())
+        execute_decode_stack();
 }
 
 uint64_t DecoderStack::get_max_sample_count()
@@ -584,6 +676,8 @@ void DecoderStack::decode_data(const uint64_t decode_start, const uint64_t decod
         }
 
         uint64_t chunk_end = end_index;
+        if (!_snapshot->is_sparse() && chunk_end - i > MaxChunkSize)
+            chunk_end = i + MaxChunkSize;
 
         for (int j =0 ; j < logic_di->dec_num_channels; j++) {
             int sig_index = logic_di->dec_channelmap[j];
@@ -618,8 +712,6 @@ void DecoderStack::decode_data(const uint64_t decode_start, const uint64_t decod
 
         if (chunk_end > end_index)
             chunk_end = end_index;
-        if (chunk_end - i > MaxChunkSize)
-            chunk_end = i + MaxChunkSize;
 
         bEndTime = (chunk_end == end_index);
 
@@ -686,6 +778,295 @@ void DecoderStack::decode_data(const uint64_t decode_start, const uint64_t decod
         decode_done();
 }
 
+bool DecoderStack::push_native_annotation(uint64_t start_sample, uint64_t end_sample,
+                                          int format, int type,
+                                          const std::vector<QString> &annotations)
+{
+    Annotation *a = new Annotation(start_sample, end_sample, format, type,
+                                   annotations, _decoder_status);
+    if (a == NULL) {
+        _no_memory = true;
+        return false;
+    }
+    _result_count++;
+
+    const srd_decoder *const decc = _stack.front()->decoder();
+    auto row_iter = _rows.end();
+    const auto r = _class_rows.find(make_pair(decc, a->format()));
+    if (r != _class_rows.end())
+        row_iter = _rows.find((*r).second);
+    else
+        row_iter = _rows.find(Row(decc));
+
+    if (row_iter == _rows.end()) {
+        delete a;
+        dsv_err("Unexpected native UART annotation: decoder = %p, format = %d",
+                (void*)decc, format);
+        return false;
+    }
+
+    if (!(*row_iter).second->push_annotation(a))
+        _no_memory = true;
+
+    return !_no_memory;
+}
+
+bool DecoderStack::execute_native_uart_decode()
+{
+    if (_stack.size() != 1) {
+        dsv_info("native uart skip: stack size=%u", (unsigned int)_stack.size());
+        return false;
+    }
+
+    decode::Decoder *dec = _stack.front();
+    const srd_decoder *const decc = dec->decoder();
+    if (decc == NULL || decc->id == NULL || strcmp(decc->id, "0:uart") != 0) {
+        dsv_info("native uart skip: decoder id=%s",
+                 (decc && decc->id) ? decc->id : "NULL");
+        return false;
+    }
+
+    if (!_is_capture_end) {
+        dsv_info("native uart defer: capture is running");
+        return true;
+    }
+
+    const int sig_index = dec->first_probe_index();
+    decode_task_status *status = _stask_stauts;
+    while (!_is_capture_end && !status->_bStop &&
+           (sig_index < 0 || !_snapshot->has_data(sig_index))) {
+        dsv_info("native uart wait data: channel=%d enabled=[%s]",
+                 sig_index, _snapshot->enabled_channel_text().toUtf8().constData());
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (sig_index < 0 || !_snapshot->has_data(sig_index)) {
+        dsv_info("native uart skip: invalid channel=%d has_data=%d enabled=[%s]",
+                 sig_index, sig_index >= 0 ? (_snapshot->has_data(sig_index) ? 1 : 0) : 0,
+                 _snapshot->enabled_channel_text().toUtf8().constData());
+        return false;
+    }
+
+    uint64_t decode_start = dec->decode_start();
+    uint64_t decode_end = 0;
+    _sample_count = _snapshot->get_ring_sample_count();
+    if (_sample_count == 0) {
+        dsv_info("native uart skip: sample_count=0");
+        return true;
+    }
+
+    decode_end = min(dec->decode_end(), _sample_count - 1);
+
+    if (decode_start >= decode_end) {
+        dsv_info("native uart skip: empty region start=%llu end=%llu sample_count=%llu",
+                 (u64_t)decode_start, (u64_t)decode_end, (u64_t)_sample_count);
+        return true;
+    }
+
+    auto &options = dec->options();
+    const int baudrate = variant_to_int(options["baudrate"], 115200);
+    const int data_bits = variant_to_int(options["num_data_bits"], 8);
+    const double stop_bits = variant_to_double(options["num_stop_bits"], 1.0);
+    const bool invert = strcmp(variant_to_string(options["invert"], "no"), "yes") == 0;
+    const bool msb_first = strcmp(variant_to_string(options["bit_order"], "lsb-first"), "msb-first") == 0;
+    const bool show_startstop = strcmp(variant_to_string(options["anno_startstop"], "no"), "yes") == 0;
+    const char *display_format = variant_to_string(options["format"], "hex");
+    const char *parity_type = variant_to_string(options["parity_type"], "none");
+    const bool has_parity = strcmp(parity_type, "none") != 0;
+
+    if (baudrate <= 0 || data_bits <= 0 || data_bits > 32) {
+        dsv_info("native uart skip: bad options baud=%d data_bits=%d",
+                 baudrate, data_bits);
+        return false;
+    }
+
+    const double bit_width = (double)_samplerate / (double)baudrate;
+    if (bit_width < 1.0) {
+        dsv_info("native uart skip: bit_width=%f samplerate=%llu baud=%d",
+                 bit_width, (u64_t)_samplerate, baudrate);
+        return false;
+    }
+
+    const uint64_t requested_decode_end = dec->decode_end();
+    const uint64_t notify_step = max<uint64_t>((decode_end - decode_start + 1) / 20, 1);
+    uint64_t last_notify = decode_start;
+    uint64_t index = decode_start;
+    const bool use_unlocked_snapshot = _is_capture_end && _snapshot->get_loop_offset() == 0;
+    const auto native_start_time = std::chrono::steady_clock::now();
+    dsv_info("native uart decode: ch=%d, start=%llu, end=%llu, baud=%d, unlocked=%d",
+             sig_index, (u64_t)decode_start, (u64_t)decode_end, baudrate,
+             use_unlocked_snapshot ? 1 : 0);
+    auto get_sample = [&](uint64_t sample) -> bool {
+        return use_unlocked_snapshot ?
+            _snapshot->get_sample_no_lock(sample, sig_index) :
+            _snapshot->get_sample(sample, sig_index);
+    };
+    auto get_nxt_edge = [&](uint64_t &sample, bool last_sample) -> bool {
+        return use_unlocked_snapshot ?
+            _snapshot->get_nxt_edge_no_lock(sample, last_sample, decode_end, 0, sig_index) :
+            _snapshot->get_nxt_edge(sample, last_sample, decode_end, 0, sig_index);
+    };
+
+    bool last_raw = get_sample(index);
+    index++;
+
+    _progress = 0;
+    _is_decoding = true;
+
+    while (!_no_memory && !status->_bStop) {
+        _sample_count = _snapshot->get_ring_sample_count();
+        if (_sample_count == 0) {
+            if (_is_capture_end)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        decode_end = min(requested_decode_end, _sample_count - 1);
+        if (index >= decode_end) {
+            if (_is_capture_end)
+                break;
+            if (decode_end > decode_start)
+                last_raw = get_sample(decode_end);
+            index = decode_end;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        uint64_t edge = index;
+        if (!get_nxt_edge(edge, last_raw)) {
+            if (_is_capture_end)
+                break;
+            if (decode_end > decode_start)
+                last_raw = get_sample(decode_end);
+            index = decode_end;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        const bool prev_raw = last_raw;
+        const bool cur_raw = get_sample(edge);
+        const bool prev_level = invert ? !last_raw : last_raw;
+        const bool cur_level = invert ? !cur_raw : cur_raw;
+        last_raw = cur_raw;
+        index = edge + 1;
+
+        if (!(prev_level && !cur_level))
+            continue;
+
+        const uint64_t frame_start = edge;
+        const double first_mid = (double)frame_start + (bit_width - 1.0) / 2.0;
+        const uint64_t start_mid = (uint64_t)ceil(first_mid);
+        const uint64_t frame_needed_end = (uint64_t)ceil((double)frame_start +
+            bit_width * (double)(1 + data_bits + (has_parity ? 1 : 0)) +
+            bit_width * stop_bits);
+        if (start_mid > decode_end || frame_needed_end > decode_end) {
+            if (_is_capture_end)
+                break;
+            index = frame_start;
+            last_raw = prev_raw;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        const bool start_bit = invert ? !get_sample(start_mid) : get_sample(start_mid);
+        if (start_bit != false) {
+            const uint64_t warn_end = min<uint64_t>(decode_end, start_mid + (uint64_t)ceil(bit_width / 2.0));
+            push_native_annotation(start_mid, warn_end, 5, 1000,
+                                   {QString("Frame error"), QString("Frame err"), QString("FE")});
+            continue;
+        }
+
+        uint32_t value = 0;
+        uint64_t last_data_mid = start_mid;
+        bool truncated = false;
+        for (int bit = 0; bit < data_bits; bit++) {
+            const uint64_t sample = (uint64_t)ceil(first_mid + bit_width * (double)(1 + bit));
+            if (sample > decode_end) {
+                truncated = true;
+                break;
+            }
+
+            bool level = get_sample(sample);
+            if (invert)
+                level = !level;
+
+            if (msb_first)
+                value = (value << 1) | (level ? 1 : 0);
+            else if (level)
+                value |= (1u << bit);
+
+            last_data_mid = sample;
+        }
+
+        if (truncated) {
+            if (_is_capture_end)
+                break;
+            index = frame_start;
+            last_raw = prev_raw;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        const uint64_t stop_mid = (uint64_t)ceil(first_mid + bit_width * (double)(1 + data_bits + (has_parity ? 1 : 0)));
+        if (stop_mid <= decode_end) {
+            bool stop_level = get_sample(stop_mid);
+            if (invert)
+                stop_level = !stop_level;
+            if (!stop_level) {
+                const uint64_t warn_end = min<uint64_t>(decode_end, stop_mid + (uint64_t)ceil(bit_width / 2.0));
+                push_native_annotation(stop_mid, warn_end, 5, 1000,
+                                       {QString("Frame error"), QString("Frame err"), QString("FE")});
+            }
+        }
+
+        const uint64_t halfbit = (uint64_t)ceil(bit_width / 2.0);
+        uint64_t ann_start = frame_start;
+        uint64_t ann_end = last_data_mid + (uint64_t)ceil((bit_width / 2.0) * (1.0 + stop_bits));
+        if (show_startstop) {
+            ann_start = start_mid > halfbit ? start_mid - halfbit : frame_start;
+            ann_end = min<uint64_t>(decode_end, last_data_mid + halfbit);
+        }
+        ann_end = min<uint64_t>(ann_end, decode_end);
+
+        push_native_annotation(ann_start, ann_end, 0, 108,
+                               {native_uart_text(value, data_bits, display_format)});
+
+        const uint64_t frame_end = frame_needed_end;
+        if (frame_end > index && frame_end < decode_end) {
+            index = frame_end;
+            last_raw = get_sample(index - 1);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(_output_mutex);
+            _samples_decoded = index - decode_start;
+        }
+
+        if (index - last_notify >= notify_step) {
+            last_notify = index;
+            const uint64_t done_total = max<uint64_t>(decode_end - decode_start + 1, 1);
+            _progress = (int)min<uint64_t>((index - decode_start) * 100 / done_total, 99);
+            new_decode_data();
+        }
+    }
+
+    _progress = 100;
+    _is_decoding = false;
+    {
+        std::lock_guard<std::mutex> lock(_output_mutex);
+        _samples_decoded = index > decode_start ? index - decode_start : 0;
+    }
+    new_decode_data();
+    if (!_session->is_closed())
+        decode_done();
+
+    const auto native_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - native_start_time).count();
+    dsv_info("native uart decode done: ch=%d, annotations=%llu, elapsed=%lld ms",
+             sig_index, (u64_t)_result_count, (long long)native_elapsed_ms);
+    return true;
+}
+
 void DecoderStack::execute_decode_stack()
 {  
 	srd_session *session = NULL;
@@ -695,64 +1076,61 @@ void DecoderStack::execute_decode_stack()
 
 	assert(_snapshot);
 
-	// Create the session
-    // one decoderstatck onwer one session
-    // all decoderstatck execute in sequence
-	srd_session_new(&session);
-
-    if (session == NULL){
-        dsv_err("Failed to call srd_session_new()");
-        assert(false);
-    }
-    
     // Get the intial sample count
     _sample_count = _snapshot->get_ring_sample_count();
- 
-    // Create the decoders
-    for(auto dec : _stack)
-	{
-        srd_decoder_inst *const di = dec->create_decoder_inst(session);
-
-		if (!di)
-		{
-			_error_message =L_S(STR_PAGE_MSG, S_ID(IDS_MSG_DECODERSTACK_DECODE_STACK_ERROR), 
-                            "Failed to create decoder instance");
-			srd_session_destroy(session);
-			return;
-		}
-
-		if (prev_di)
-			srd_inst_stack (session, prev_di, di);
-
-		prev_di = di;
-        decode_start = dec->decode_start();
-
-        if (_session->is_realtime_refresh() == false)
-            decode_end = min(dec->decode_end(), _sample_count-1);
-        else
-            decode_end = max(dec->decode_end(), decode_end);
-	}
-
-    dsv_info("decoder start sample:%llu, end sample:%llu, count:%llu", 
-            (u64_t)decode_start, (u64_t)decode_end, (u64_t)(decode_end - decode_start + 1));
-
-	// Start the session
-	srd_session_metadata_set(session, SRD_CONF_SAMPLERATE,
-		g_variant_new_uint64((uint64_t)_samplerate));
-
-	srd_pd_output_callback_add(
-                    session, 
-                    SRD_OUTPUT_ANN,
-		            DecoderStack::annotation_callback,
-                    _stask_stauts);
 
     char *error = NULL;
-    if (srd_session_start(session, &error) == SRD_OK){
-       //need a lot time
-        decode_data(decode_start, decode_end, session);
+    bool session_started = false;
+    {
+        std::lock_guard<std::mutex> lock(srd_session_mutex);
+
+        srd_session_new(&session);
+        if (session == NULL) {
+            dsv_err("Failed to call srd_session_new()");
+            assert(false);
+            return;
+        }
+
+        for (auto dec : _stack) {
+            srd_decoder_inst *const di = dec->create_decoder_inst(session);
+            if (!di) {
+                _error_message = L_S(STR_PAGE_MSG,
+                    S_ID(IDS_MSG_DECODERSTACK_DECODE_STACK_ERROR),
+                    "Failed to create decoder instance");
+                srd_session_destroy(session);
+                return;
+            }
+
+            if (prev_di)
+                srd_inst_stack(session, prev_di, di);
+
+            prev_di = di;
+            decode_start = dec->decode_start();
+            if (_session->is_realtime_refresh() == false)
+                decode_end = min(dec->decode_end(), _sample_count - 1);
+            else
+                decode_end = max(dec->decode_end(), decode_end);
+        }
+
+        srd_session_metadata_set(session, SRD_CONF_SAMPLERATE,
+            g_variant_new_uint64((uint64_t)_samplerate));
+        srd_pd_output_callback_add(session, SRD_OUTPUT_ANN,
+            DecoderStack::annotation_callback, _stask_stauts);
+
+        session_started = srd_session_start(session, &error) == SRD_OK;
+        if (!session_started) {
+            if (error != NULL)
+                _error_message = QString::fromLocal8Bit(error);
+        }
     }
-    else if (error != NULL){
-        _error_message = QString::fromLocal8Bit(error);
+
+    dsv_info("decoder start sample:%llu, end sample:%llu, count:%llu",
+            (u64_t)decode_start, (u64_t)decode_end,
+            (u64_t)(decode_end - decode_start + 1));
+
+    if (session_started) {
+	       //need a lot time
+        decode_data(decode_start, decode_end, session);
     }
 
 	// Destroy the session
@@ -760,7 +1138,10 @@ void DecoderStack::execute_decode_stack()
         g_free(error);
     }
 
-	srd_session_destroy(session); 
+    {
+        std::lock_guard<std::mutex> lock(srd_session_mutex);
+	    srd_session_destroy(session);
+    }
 }
 
 uint64_t DecoderStack::sample_count()

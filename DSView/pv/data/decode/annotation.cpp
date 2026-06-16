@@ -103,6 +103,37 @@ Annotation::Annotation(const srd_proto_data *const pdata, DecoderStatus *status)
 	}
 }
 
+Annotation::Annotation(uint64_t start_sample, uint64_t end_sample, int format,
+                       int type, const std::vector<QString> &annotations,
+                       DecoderStatus *status)
+{
+    assert(status);
+
+    _start_sample = start_sample;
+    _end_sample = end_sample;
+    _format = format;
+    _type = type;
+    _resIndex = -1;
+    _status = status;
+
+    std::string key;
+    for (const QString &line : annotations) {
+        QByteArray bytes = line.toUtf8();
+        if (!bytes.isEmpty() && bytes.constData()[0] != '\n')
+            key.append(bytes.constData(), bytes.size());
+    }
+
+    AnnotationSourceItem *resItem = NULL;
+    _resIndex = _status->m_resTable.MakeIndex(key, resItem);
+    if (resItem != NULL) {
+        for (const QString &line : annotations) {
+            if (!line.startsWith('\n'))
+                resItem->src_lines.push_back(line);
+        }
+        _status->m_bNumeric |= resItem->is_numeric;
+    }
+}
+
 Annotation::Annotation()
 {
     _start_sample = 0;

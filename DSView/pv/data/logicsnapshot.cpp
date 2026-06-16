@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <algorithm>
  
 #include "logicsnapshot.h"
 #include "../dsvdef.h"
@@ -56,6 +57,8 @@ LogicSnapshot::LogicSnapshot() :
     _is_loop = false;
     _loop_offset = 0;
     _able_free = true;
+    _sparse_mode = false;
+    _sparse_last_prune = 0;
 }
 
 LogicSnapshot::~LogicSnapshot()
@@ -77,6 +80,9 @@ void LogicSnapshot::free_data()
         iter.swap(void_vector);
     }
     _ch_data.clear();
+    _sparse_edges.clear();
+    _sparse_last_prune = 0;
+    _sparse_block_cache.clear();
     _sample_count = 0;
 
     for(void *p : _free_block_list){
@@ -102,6 +108,7 @@ void LogicSnapshot::init_all()
     _last_ended = true;
     _loop_offset = 0;
     _able_free = true;
+    _sparse_mode = false;
 }
 
 void LogicSnapshot::clear()
@@ -113,6 +120,13 @@ void LogicSnapshot::clear()
 
 void LogicSnapshot::first_payload(const sr_datafeed_logic &logic, uint64_t total_sample_count, GSList *channels, bool able_free)
 {
+    if (logic.format == LA_SPARSE_EVENTS) {
+        init_sparse(total_sample_count, channels);
+        append_sparse_payload(logic);
+        _last_ended = false;
+        return;
+    }
+
     bool channel_changed = false;
     uint16_t channel_num = 0;
     _able_free = able_free;
@@ -209,7 +223,197 @@ void LogicSnapshot::append_payload(const sr_datafeed_logic &logic)
 {
     std::lock_guard<std::mutex> lock(_mutex);
 
-    append_cross_payload(logic);
+    if (logic.format == LA_SPARSE_EVENTS)
+        append_sparse_payload(logic);
+    else
+        append_cross_payload(logic);
+}
+
+void LogicSnapshot::init_sparse(uint64_t total_sample_count, GSList *channels)
+{
+    free_data();
+    _ch_index.clear();
+    _total_sample_count = total_sample_count;
+
+    for (const GSList *l = channels; l; l = l->next) {
+        sr_channel *const probe = (sr_channel*)l->data;
+        if (probe->type == SR_CHANNEL_LOGIC && probe->enabled)
+            _ch_index.push_back(probe->index);
+    }
+
+    _channel_num = _ch_index.size();
+    assert(_channel_num > 0 && _channel_num < CHANNEL_MAX_COUNT);
+    _sparse_mode = true;
+    _sparse_edges.resize(_channel_num);
+    _sparse_state = 0;
+    _sparse_last_prune = 0;
+    _sparse_block_cache.resize(_channel_num);
+    _sample_count = 0;
+    _ring_sample_count = 0;
+    _loop_offset = 0;
+    _memory_failed = false;
+}
+
+void LogicSnapshot::append_sparse_payload(const sr_datafeed_logic &logic)
+{
+    assert(_sparse_mode);
+    assert(logic.format == LA_SPARSE_EVENTS);
+    assert(logic.data);
+    assert(logic.length >= sizeof(sr_logic_sparse_event));
+    assert(logic.length % sizeof(sr_logic_sparse_event) == 0);
+
+    const sr_logic_sparse_event *events =
+        (const sr_logic_sparse_event*)logic.data;
+    const uint64_t count = logic.length / sizeof(sr_logic_sparse_event);
+    uint64_t absolute_end = _loop_offset + _ring_sample_count;
+
+    for (uint64_t i = 0; i < count; i++) {
+        const uint64_t sample = events[i].sample;
+        const uint32_t state = events[i].state;
+        uint32_t changed = state ^ _sparse_state;
+
+        while (changed) {
+            const unsigned int channel = (unsigned int)__builtin_ctz(changed);
+            const int order = get_ch_order(channel);
+            if (order >= 0 && (_is_loop || sample <= _total_sample_count)) {
+                SparseEdge edge = {
+                    sample,
+                    (state & (1u << channel)) != 0
+                };
+                _sparse_edges[order].push_back(edge);
+            }
+            changed &= changed - 1;
+        }
+
+        _sparse_state = state;
+        absolute_end = max(absolute_end, sample);
+    }
+
+    if (!_is_loop)
+        absolute_end = min(absolute_end, _total_sample_count);
+
+    if (_is_loop && absolute_end > _total_sample_count) {
+        _loop_offset = absolute_end - _total_sample_count;
+        _ring_sample_count = _total_sample_count;
+        _sample_count = _total_sample_count;
+        const uint64_t prune_step = std::max<uint64_t>(
+            _samplerate > 0 ? (uint64_t)_samplerate : 24000000ULL,
+            LeafBlockSamples);
+        if (_sparse_last_prune == 0 ||
+            _loop_offset - _sparse_last_prune >= prune_step) {
+            const auto prune_start = std::chrono::steady_clock::now();
+            sparse_prune(_loop_offset);
+            _sparse_last_prune = _loop_offset;
+            const auto prune_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - prune_start).count();
+            dsv_info("LogicSnapshot sparse prune: loop_offset=%llu elapsed=%lld ms",
+                     (unsigned long long)_loop_offset,
+                     (long long)prune_elapsed_ms);
+        }
+    } else {
+        _ring_sample_count = absolute_end;
+        _sample_count = min(absolute_end, _total_sample_count);
+    }
+}
+
+bool LogicSnapshot::sparse_sample(uint64_t index, int order) const
+{
+    const std::vector<SparseEdge> &edges = _sparse_edges[order];
+    const auto it = upper_bound(edges.begin(), edges.end(), index,
+        [](uint64_t sample, const SparseEdge &edge) {
+            return sample < edge.sample;
+        });
+    return it == edges.begin() ? false : (it - 1)->level;
+}
+
+bool LogicSnapshot::sparse_next_edge(uint64_t &index, uint64_t end,
+                                     int order) const
+{
+    const std::vector<SparseEdge> &edges = _sparse_edges[order];
+    const auto it = lower_bound(edges.begin(), edges.end(), index,
+        [](const SparseEdge &edge, uint64_t sample) {
+            return edge.sample < sample;
+        });
+    if (it == edges.end() || it->sample > end)
+        return false;
+    index = it->sample;
+    return true;
+}
+
+bool LogicSnapshot::sparse_prev_edge(uint64_t &index, int order) const
+{
+    const std::vector<SparseEdge> &edges = _sparse_edges[order];
+    auto it = upper_bound(edges.begin(), edges.end(), index,
+        [](uint64_t sample, const SparseEdge &edge) {
+            return sample < edge.sample;
+        });
+    if (it == edges.begin())
+        return false;
+    --it;
+    index = it->sample;
+    return true;
+}
+
+void LogicSnapshot::sparse_prune(uint64_t start)
+{
+    for (unsigned int order = 0; order < _channel_num; order++) {
+        std::vector<SparseEdge> &edges = _sparse_edges[order];
+        const bool level = sparse_sample(start, order);
+        auto keep = lower_bound(edges.begin(), edges.end(), start,
+            [](const SparseEdge &edge, uint64_t sample) {
+                return edge.sample < sample;
+            });
+        edges.erase(edges.begin(), keep);
+        if (level && (edges.empty() || edges.front().sample != start)) {
+            SparseEdge edge = {start, true};
+            edges.insert(edges.begin(), edge);
+        }
+    }
+}
+
+void LogicSnapshot::materialize_sparse(uint64_t start, uint64_t end, int order,
+                                       std::vector<uint8_t> &buffer) const
+{
+    assert(start <= end);
+    const uint64_t samples = end - start;
+    buffer.assign((samples + 7) / 8, 0);
+    if (!samples)
+        return;
+
+    auto set_high = [&buffer, start](uint64_t from, uint64_t to) {
+        uint64_t first = from - start;
+        uint64_t last = to - start;
+        while (first < last && (first & 7)) {
+            buffer[first >> 3] |= (uint8_t)(1u << (first & 7));
+            first++;
+        }
+        const uint64_t full_bytes = (last - first) >> 3;
+        if (full_bytes) {
+            memset(buffer.data() + (first >> 3), 0xff, full_bytes);
+            first += full_bytes << 3;
+        }
+        while (first < last) {
+            buffer[first >> 3] |= (uint8_t)(1u << (first & 7));
+            first++;
+        }
+    };
+
+    const std::vector<SparseEdge> &edges = _sparse_edges[order];
+    bool level = sparse_sample(start, order);
+    uint64_t cursor = start;
+    auto it = upper_bound(edges.begin(), edges.end(), start,
+        [](uint64_t sample, const SparseEdge &edge) {
+            return sample < edge.sample;
+        });
+
+    for (; it != edges.end() && it->sample < end; ++it) {
+        if (level)
+            set_high(cursor, it->sample);
+        cursor = it->sample;
+        level = it->level;
+    }
+    if (level)
+        set_high(cursor, end);
 }
 
 void LogicSnapshot::append_cross_payload(const sr_datafeed_logic &logic)
@@ -457,6 +661,11 @@ void LogicSnapshot::capture_ended()
 
     Snapshot::capture_ended();  
 
+    if (_sparse_mode) {
+        _sample_count = _ring_sample_count;
+        return;
+    }
+
     _sample_count = _ring_sample_count;
     _ring_sample_count += _loop_offset;
     
@@ -599,6 +808,28 @@ const uint8_t *LogicSnapshot::get_samples(uint64_t start_sample, uint64_t &end_s
 
     assert(start_sample < sample_count);
 
+    int order = get_ch_order(sig_index);
+    if (_sparse_mode) {
+        if (order == -1)
+            return NULL;
+
+        end_sample = min(end_sample, sample_count);
+        assert(start_sample < end_sample);
+
+        const uint64_t absolute_start = start_sample + _loop_offset;
+        const std::vector<SparseEdge> &edges = _sparse_edges[order];
+        const auto next = upper_bound(edges.begin(), edges.end(), absolute_start,
+            [](uint64_t sample, const SparseEdge &edge) {
+                return sample < edge.sample;
+            });
+        if (next != edges.end())
+            end_sample = min(end_sample, next->sample - _loop_offset);
+
+        if (lbp != NULL)
+            *lbp = NULL;
+        return NULL;
+    }
+
     if (end_sample >= sample_count)
         end_sample = sample_count - 1;
 
@@ -608,7 +839,6 @@ const uint8_t *LogicSnapshot::get_samples(uint64_t start_sample, uint64_t &end_s
     start_sample += _loop_offset;
     _ring_sample_count += _loop_offset;
 
-    int order = get_ch_order(sig_index);
     uint64_t index0 = start_sample >> (LeafBlockPower + RootScalePower);
     uint64_t index1 = (start_sample & RootMask) >> LeafBlockPower;
     uint64_t offset = (start_sample & LeafMask) / 8;
@@ -640,6 +870,12 @@ bool LogicSnapshot::get_sample(uint64_t index, int sig_index)
     return get_sample_unlock(index, sig_index);
 }
 
+bool LogicSnapshot::get_sample_no_lock(uint64_t index, int sig_index)
+{
+    assert(_loop_offset == 0);
+    return get_sample_self(index, sig_index);
+}
+
 bool LogicSnapshot::get_sample_unlock(uint64_t index, int sig_index)
 {
     index += _loop_offset;
@@ -655,6 +891,10 @@ bool LogicSnapshot::get_sample_self(uint64_t index, int sig_index)
 {
     int order = get_ch_order(sig_index);
     assert(order != -1);
+
+    if (_sparse_mode)
+        return index < _ring_sample_count ? sparse_sample(index, order) : false;
+
     assert(_ch_data[order].size() != 0);
 
     if (index < _ring_sample_count) {
@@ -744,6 +984,13 @@ bool LogicSnapshot::get_nxt_edge(uint64_t &index, bool last_sample, uint64_t end
     return get_nxt_edge_unlock(index, last_sample, end, min_length, sig_index);
 }
 
+bool LogicSnapshot::get_nxt_edge_no_lock(uint64_t &index, bool last_sample,
+                      uint64_t end, double min_length, int sig_index)
+{
+    assert(_loop_offset == 0);
+    return get_nxt_edge_self(index, last_sample, end, min_length, sig_index);
+}
+
 bool LogicSnapshot::get_nxt_edge_unlock(uint64_t &index, bool last_sample, uint64_t end,
                       double min_length, int sig_index)
 {
@@ -767,6 +1014,12 @@ bool LogicSnapshot::get_nxt_edge_self(uint64_t &index, bool last_sample, uint64_
     int order = get_ch_order(sig_index);
     if (order == -1)
         return false;
+
+    if (_sparse_mode) {
+        (void)last_sample;
+        (void)min_length;
+        return sparse_next_edge(index, end, order);
+    }
 
     //const unsigned int min_level = max((int)floorf(logf(min_length) / logf(Scale)) - 1, 0);
     const unsigned int min_level = max((int)(log2f(min_length) - 1) / (int)ScalePower, 0);
@@ -861,6 +1114,12 @@ bool LogicSnapshot::get_pre_edge_self(uint64_t &index, bool last_sample,
     int order = get_ch_order(sig_index);
     if (order == -1)
         return false;
+
+    if (_sparse_mode) {
+        (void)last_sample;
+        (void)min_length;
+        return sparse_prev_edge(index, order);
+    }
 
     //const unsigned int min_level = max((int)floorf(logf(min_length) / logf(Scale)) - 1, 1);
     const unsigned int min_level = max((int)(log2f(min_length) - 1) / (int)ScalePower, 0);
@@ -1352,6 +1611,17 @@ bool LogicSnapshot::has_data(int sig_index)
     return get_ch_order(sig_index) != -1;
 }
 
+QString LogicSnapshot::enabled_channel_text() const
+{
+    QString text;
+    for (uint16_t index : _ch_index) {
+        if (!text.isEmpty())
+            text += ",";
+        text += QString::number(index);
+    }
+    return text;
+}
+
 int LogicSnapshot::get_block_num()
 {
    int block = ceil((_ring_sample_count+_loop_offset) * 1.0 / LeafBlockSamples) 
@@ -1405,6 +1675,22 @@ uint8_t *LogicSnapshot::get_block_buf(int block_index, int sig_index, bool &samp
         return NULL;
     }
 
+    if (_sparse_mode) {
+        const uint64_t absolute_block =
+            block_index + _loop_offset / LeafBlockSamples;
+        uint64_t start = absolute_block * LeafBlockSamples;
+        const uint64_t absolute_end = _loop_offset + _ring_sample_count;
+
+        if (block_index == 0)
+            start = max(start, _loop_offset);
+
+        const uint64_t end =
+            min((absolute_block + 1) * LeafBlockSamples, absolute_end);
+        sample = sparse_sample(start, order);
+        materialize_sparse(start, end, order, _sparse_block_cache[order]);
+        return _sparse_block_cache[order].data();
+    }
+
     int block_index0 = block_index;
     block_index += _loop_offset / LeafBlockSamples;
 
@@ -1421,6 +1707,17 @@ uint8_t *LogicSnapshot::get_block_buf(int block_index, int sig_index, bool &samp
     }
 
     return lbp;
+}
+
+void LogicSnapshot::clear_materialized_blocks()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    if (!_sparse_mode)
+        return;
+
+    for (std::vector<uint8_t> &buffer : _sparse_block_cache)
+        std::vector<uint8_t>().swap(buffer);
 }
 
 int LogicSnapshot::get_ch_order(int sig_index)

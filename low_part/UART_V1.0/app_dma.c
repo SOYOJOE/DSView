@@ -12,16 +12,6 @@
 unsigned char rec_buff[256] __attribute__((aligned(4))) = {0};
 volatile unsigned int rev_data_len = 0;
 
-/* ─── User callback stubs (override for critical section protection) ─── */
-
-void user_critical_enter(void) {}
-void user_critical_exit(void) {}
-
-uint32_t user_timer_ticks(void)
-{
-    return stimer_get_tick();
-}
-
 /* ─── Platform init ─── */
 
 void user_init(void)

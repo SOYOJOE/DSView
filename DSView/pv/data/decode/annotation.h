@@ -42,6 +42,9 @@ class Annotation
 {
 public:
 	Annotation(const srd_proto_data *const pdata, DecoderStatus *status);
+    Annotation(uint64_t start_sample, uint64_t end_sample, int format,
+               int type, const std::vector<QString> &annotations,
+               DecoderStatus *status);
     Annotation();
 	~Annotation();
 

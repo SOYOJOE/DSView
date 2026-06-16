@@ -83,6 +83,12 @@ private:
         uint64_t    lbp_index;
     };
 
+    struct SparseEdge
+    {
+        uint64_t sample;
+        bool level;
+    };
+
 public:
     typedef std::pair<uint64_t, bool> EdgePair;
 
@@ -108,6 +114,8 @@ public:
 
     bool get_sample(uint64_t index, int sig_index);
 
+    bool get_sample_no_lock(uint64_t index, int sig_index);
+
     void capture_ended();
 
     bool get_display_edges(std::vector<std::pair<bool, bool>> &edges,
@@ -119,13 +127,18 @@ public:
     bool get_nxt_edge(uint64_t &index, bool last_sample, uint64_t end,
                       double min_length, int sig_index);
 
+    bool get_nxt_edge_no_lock(uint64_t &index, bool last_sample,
+                              uint64_t end, double min_length, int sig_index);
+
     bool get_pre_edge(uint64_t &index, bool last_sample,
                       double min_length, int sig_index);
 
     bool has_data(int sig_index);
+    QString enabled_channel_text() const;
     int get_block_num();
     uint64_t get_block_size(int block_index);
     uint8_t *get_block_buf(int block_index, int sig_index, bool &sample);
+    void clear_materialized_blocks();
  
     bool pattern_search(int64_t start, int64_t end, int64_t& index,
                         std::map<uint16_t, QString> &pattern, bool isNext);
@@ -143,8 +156,12 @@ public:
     void free_decode_lpb(void *lbp);
 
     inline bool is_able_free(){
-        return _able_free;
+        return _sparse_mode || _able_free;
     } 
+
+    inline bool is_sparse() const {
+        return _sparse_mode;
+    }
 
     inline uint64_t get_loop_offset(){
         return _loop_offset;
@@ -172,6 +189,14 @@ private:
     void calc_mipmap(unsigned int order, uint8_t index0, uint8_t index1, uint64_t samples, bool isEnd);
 
     void append_cross_payload(const sr_datafeed_logic &logic);
+    void append_sparse_payload(const sr_datafeed_logic &logic);
+    void init_sparse(uint64_t total_sample_count, GSList *channels);
+    bool sparse_sample(uint64_t index, int order) const;
+    bool sparse_next_edge(uint64_t &index, uint64_t end, int order) const;
+    bool sparse_prev_edge(uint64_t &index, int order) const;
+    void sparse_prune(uint64_t start);
+    void materialize_sparse(uint64_t start, uint64_t end, int order,
+                            std::vector<uint8_t> &buffer) const;
 
     bool lbp_nxt_edge(uint64_t &index, uint64_t root_index, uint64_t lbp_tog, uint8_t lbp_tog_pos,
                       bool aft_tog, uint8_t aft_pos, bool last_sample, int sig_index);
@@ -242,6 +267,11 @@ private:
 
 private:
     std::vector<std::vector<struct RootNode>> _ch_data;
+    bool        _sparse_mode;
+    std::vector<std::vector<struct SparseEdge>> _sparse_edges;
+    uint32_t    _sparse_state;
+    uint64_t    _sparse_last_prune;
+    std::vector<std::vector<uint8_t>> _sparse_block_cache;
     uint8_t     _byte_fraction;
     uint16_t    _ch_fraction;
     uint8_t    *_dest_ptr;

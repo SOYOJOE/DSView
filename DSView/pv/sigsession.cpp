@@ -115,6 +115,8 @@ namespace pv
 
         _lissajous_trace = NULL;
         _math_trace = NULL;
+        _decode_worker_limit = 0;
+        _active_decode_workers = 0;
         _is_decoding = false;
         _bClose = false;
         _callback = NULL;
@@ -139,6 +141,9 @@ namespace pv
 
     SigSession::~SigSession()
     {
+        for (auto trace : _decode_traces)
+            trace->decoder()->stop_decode_work();
+        join_decode_threads();
         for(auto p : _data_list){
             p->clear();
             delete p;
@@ -1194,6 +1199,10 @@ namespace pv
 
     void SigSession::feed_in_logic(const sr_datafeed_logic &o)
     {  
+        const bool first_payload = _capture_data->get_logic()->last_ended();
+        const uint64_t previous_sample_count = first_payload ? 0 :
+            _capture_data->get_logic()->get_ring_sample_count();
+
         if (_capture_data->get_logic()->memory_failed())
         {
             dsv_err("Unexpected logic packet");
@@ -1206,7 +1215,7 @@ namespace pv
             _trig_time = QDateTime::currentDateTime();
         }  
 
-        if (_capture_data->get_logic()->last_ended())
+        if (first_payload)
         {
             _capture_data->get_logic()->set_loop(is_loop_mode());
 
@@ -1236,7 +1245,15 @@ namespace pv
             return;
         }
 
-        set_receive_data_len(o.length * 8 / get_ch_num(SR_CHANNEL_LOGIC));
+        if (o.format == LA_SPARSE_EVENTS) {
+            const uint64_t sample_count =
+                _capture_data->get_logic()->get_ring_sample_count();
+            set_receive_data_len(sample_count > previous_sample_count ?
+                sample_count - previous_sample_count : 1);
+        } else {
+            set_receive_data_len(o.length * 8 /
+                                 get_ch_num(SR_CHANNEL_LOGIC));
+        }
 
         _data_updated = true;
     }
@@ -1861,14 +1878,17 @@ namespace pv
         std::lock_guard<std::mutex> lock(_decode_task_mutex);
         _decode_tasks.push_back(trace);
 
-        if (!_is_decoding)
-        {
-            if (_decode_thread.joinable())
-                _decode_thread.join();
-
-            _decode_thread = std::thread(&SigSession::decode_task_proc, this);
-            _is_decoding = true;
+        if (_decode_worker_limit == 0) {
+            _decode_worker_limit = std::thread::hardware_concurrency();
+            if (_decode_worker_limit == 0)
+                _decode_worker_limit = 1;
         }
+
+        if (_active_decode_workers < _decode_worker_limit) {
+            _active_decode_workers++;
+            _decode_threads.emplace_back(&SigSession::decode_task_proc, this);
+        }
+        _is_decoding = true;
     }
 
     void SigSession::remove_decode_task(view::DecodeTrace *trace)
@@ -1892,25 +1912,16 @@ namespace pv
 
     void SigSession::clear_all_decoder(bool bUpdateView)
     {
-        if (_decode_traces.empty())
+        if (_decode_traces.empty()) {
+            join_decode_threads();
             return;
+        }
 
-        // create the wait task deque
         int dex = -1;
         clear_all_decode_task(dex);
 
-        view::DecodeTrace *runningTrace = NULL;
-        if (dex != -1)
-        {
-            runningTrace = _decode_traces[dex];
-            runningTrace->_delete_flag = true; // destroy it in thread
-        }
-
         for (auto trace : _decode_traces)
-        {
-            if (trace != runningTrace)
-                delete trace;
-        }
+            delete trace;
         _decode_traces.clear();
 
         if (!_bClose && bUpdateView)
@@ -1944,9 +1955,17 @@ namespace pv
             dex++;
         }
 
-        // Wait the thread end.
-        if (_decode_thread.joinable())
-            _decode_thread.join();
+        join_decode_threads();
+        runningDex = -1;
+    }
+
+    void SigSession::join_decode_threads()
+    {
+        for (auto &thread : _decode_threads) {
+            if (thread.joinable())
+                thread.join();
+        }
+        _decode_threads.clear();
     }
 
     view::DecodeTrace *SigSession::get_decoder_trace(int index)
@@ -1958,53 +1977,48 @@ namespace pv
         assert(false);
     }
 
-    view::DecodeTrace *SigSession::get_top_decode_task()
-    {
-        std::lock_guard<std::mutex> lock(_decode_task_mutex);
-
-        auto it = _decode_tasks.begin();
-        if (it != _decode_tasks.end())
-        {
-            auto p = (*it);
-            _decode_tasks.erase(it);
-            return p;
-        }
-
-        return NULL;
-    }
-
     // the decode task thread proc
     void SigSession::decode_task_proc()
     {
-        dsv_info("------->decode thread start");
-        auto task = get_top_decode_task();
+        bool last_worker = false;
 
-        while (task != NULL)
+        dsv_info("------->decode worker start");
+        while (true)
         {
-            if (!task->_delete_flag)
+            view::DecodeTrace *task = NULL;
             {
-                task->decoder()->begin_decode_work();
+                std::lock_guard<std::mutex> lock(_decode_task_mutex);
+                if (!_decode_tasks.empty()) {
+                    task = _decode_tasks.front();
+                    _decode_tasks.erase(_decode_tasks.begin());
+                } else {
+                    assert(_active_decode_workers > 0);
+                    _active_decode_workers--;
+                    if (_active_decode_workers == 0) {
+                        _is_decoding = false;
+                        last_worker = true;
+                    }
+                }
             }
+
+            if (task == NULL)
+                break;
+
+            if (!task->_delete_flag)
+                task->decoder()->begin_decode_work();
 
             if (task->_delete_flag)
             {
                 dsv_info("destroy a decoder in task thread");
-
                 DESTROY_QT_LATER(task);
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 if (!_bClose)
-                {
                     signals_changed();
-                }
             }
-
-            task = get_top_decode_task();
         }
 
-        _view_data->get_logic()->decode_end();
-
-        dsv_info("------->decode thread end");
-        _is_decoding = false;        
+        if (last_worker)
+            _view_data->get_logic()->decode_end();
+        dsv_info("------->decode worker end");
     }
 
     Snapshot *SigSession::get_signal_snapshot()
@@ -2218,8 +2232,7 @@ namespace pv
 
                     if (is_single_mode())
                     {
-                        if (!_is_stream_mode)
-                            bAddDecoder = true;
+                        bAddDecoder = true;
                     }
                     else if(is_repeat_mode())
                     {

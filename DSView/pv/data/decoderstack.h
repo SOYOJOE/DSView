@@ -75,7 +75,7 @@ private:
 	static const double DecodeThreshold;
 	static const int64_t DecodeChunkLength;
 	static const unsigned int DecodeNotifyPeriod;
-    static const uint64_t MaxChunkSize = 1024 * 16;
+    static const uint64_t MaxChunkSize = 1024 * 256;
 
 public:
     enum decode_state {
@@ -190,6 +190,10 @@ public:
 private:
     void decode_data(const uint64_t decode_start, const uint64_t decode_end, srd_session *const session);
 	void execute_decode_stack();
+    bool execute_native_uart_decode();
+    bool push_native_annotation(uint64_t start_sample, uint64_t end_sample,
+                                int format, int type,
+                                const std::vector<QString> &annotations);
 	static void annotation_callback(srd_proto_data *pdata, void *self);
     void do_decode_work();
   

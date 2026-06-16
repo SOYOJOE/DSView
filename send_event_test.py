@@ -171,6 +171,51 @@ def scenario_max_wire(args):
     return stream()
 
 
+def scenario_gpio_frequency(args):
+    """Toggle every GPIO at the requested per-channel frequency."""
+    channels = args.gpio_channels
+    half_period_events = channels * args.gpio_frequency * 2
+    delta = max(1, round(TICK_HZ / half_period_events))
+
+    def stream():
+        yield sync_event()
+        channel = 0
+        while True:
+            yield gpio_event(delta, channel, GPIO_TOGGLE)
+            channel = (channel + 1) % channels
+    return stream()
+
+
+def scenario_gpio_uart_1k(_args):
+    """1,000 toggles/s plus the firmware's 11-byte string event per RX.
+
+    One cycle is 24,000 samples. All UART payloads are queued at the start of
+    the cycle, then 24 GPIO edges are spaced by 1,000 samples. Each GPIO gets
+    one edge per millisecond (1,000 toggles/s, a 500 Hz square wave).
+
+    The string event matches app_dma.c: label "lable:" (6 bytes) plus five
+    data bytes. RX0-RX3 use HEX rendering; RX4-RX7 use ASCII.
+    """
+    label = b"lable:"
+    uart_bytes = bytes(range(5))
+
+    def stream():
+        yield sync_event()
+        sequence = 0
+        while True:
+            for channel in range(UART_CHANNELS):
+                data = bytes(((value + sequence + channel) & 0x7F) or 0x20
+                             for value in uart_bytes)
+                mode = RENDER_HEX if channel < 4 else RENDER_ASCII
+                yield string_event(0, channel, mode, label=label, data=data)
+
+            for channel in range(GPIO_CHANNELS):
+                yield gpio_event(1_000, channel, GPIO_TOGGLE)
+
+            sequence = (sequence + 1) & 0x1F
+    return stream()
+
+
 def scenario_max_uart(_args):
     """Keep all eight virtual 6 Mbaud RX channels continuously active.
 
@@ -246,6 +291,16 @@ SCENARIOS = {
         scenario_max_wire,
         True,
     ),
+    "gpio-frequency": (
+        "Toggle each selected GPIO at an exact frequency",
+        scenario_gpio_frequency,
+        True,
+    ),
+    "gpio-uart-1k": (
+        "24 GPIOs at 1000 toggles/s plus 11 bytes/ms on each RX0-RX7",
+        scenario_gpio_uart_1k,
+        True,
+    ),
     "max-uart": (
         "Continuous maximum virtual UART load on RX0-RX7",
         scenario_max_uart,
@@ -260,8 +315,11 @@ SCENARIOS = {
 
 
 class RateLimiter:
-    def __init__(self, wire_mbps):
-        self.bytes_per_second = wire_mbps * 1_000_000 / 10 if wire_mbps else 0
+    def __init__(self, wire_mbps, payload_mbps):
+        if payload_mbps:
+            self.bytes_per_second = payload_mbps * 1_000_000 / 8
+        else:
+            self.bytes_per_second = wire_mbps * 1_000_000 / 10 if wire_mbps else 0
         self.started = time.monotonic()
         self.sent = 0
 
@@ -275,8 +333,9 @@ class RateLimiter:
             time.sleep(delay)
 
 
-def send_stream(conn, packets, duration, wire_mbps, report_interval):
-    limiter = RateLimiter(wire_mbps)
+def send_stream(conn, packets, duration, wire_mbps, payload_mbps,
+                report_interval):
+    limiter = RateLimiter(wire_mbps, payload_mbps)
     started = time.monotonic()
     report_at = started + report_interval
     total_bytes = 0
@@ -341,6 +400,12 @@ def parse_args():
                         help="stop sending after N wall-clock seconds")
     parser.add_argument("--wire-mbps", type=float, default=0,
                         help="pace output like an N-Mbaud 8N1 UART; 0 is unlimited")
+    parser.add_argument("--payload-mbps", type=float, default=0,
+                        help="pace TCP protocol payload in Mbps; excludes 8N1 overhead")
+    parser.add_argument("--gpio-frequency", type=float, default=1_000,
+                        help="per-channel frequency for gpio-frequency (default: 1000 Hz)")
+    parser.add_argument("--gpio-channels", type=int, default=24,
+                        help="channel count for gpio-frequency (default: 24)")
     parser.add_argument("--report-interval", type=float, default=1.0,
                         help="throughput report interval in seconds")
     parser.add_argument("--repeat", action="store_true",
@@ -355,6 +420,14 @@ def parse_args():
         parser.error("--duration must be non-negative")
     if args.wire_mbps < 0:
         parser.error("--wire-mbps must be non-negative")
+    if args.payload_mbps < 0:
+        parser.error("--payload-mbps must be non-negative")
+    if args.wire_mbps and args.payload_mbps:
+        parser.error("--wire-mbps and --payload-mbps are mutually exclusive")
+    if args.gpio_frequency <= 0:
+        parser.error("--gpio-frequency must be positive")
+    if not 1 <= args.gpio_channels <= GPIO_CHANNELS:
+        parser.error(f"--gpio-channels must be in range 1..{GPIO_CHANNELS}")
     if args.report_interval <= 0:
         parser.error("--report-interval must be positive")
     if not 1 <= args.port <= 65535:
@@ -374,7 +447,15 @@ def serve(args):
 
         print(f"Scenario : {args.scenario} - {description}")
         print(f"TCP      : listening on {args.host}:{args.port}")
-        print(f"Pacing   : {'unlimited TCP' if not args.wire_mbps else f'{args.wire_mbps:g} Mbaud 8N1'}")
+        if args.payload_mbps:
+            pacing = f"{args.payload_mbps:g} Mbps TCP payload"
+        elif args.wire_mbps:
+            pacing = f"{args.wire_mbps:g} Mbaud 8N1"
+        else:
+            pacing = "unlimited TCP"
+        print(f"Pacing   : {pacing}")
+        if args.scenario == "gpio-uart-1k":
+            print("Load     : 2.048 Mbps protocol payload, 2.56 Mbaud with 8N1")
         print("Start DSView acquisition now.")
 
         while True:
@@ -388,6 +469,7 @@ def serve(args):
                         factory(args),
                         args.duration,
                         args.wire_mbps,
+                        args.payload_mbps,
                         args.report_interval,
                     )
                     print(f"Finished : {total_bytes / 1_000_000:.3f} MB, "
