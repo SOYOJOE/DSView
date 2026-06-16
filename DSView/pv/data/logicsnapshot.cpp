@@ -58,6 +58,7 @@ LogicSnapshot::LogicSnapshot() :
     _loop_offset = 0;
     _able_free = true;
     _sparse_mode = false;
+    _sparse_last_prune = 0;
 }
 
 LogicSnapshot::~LogicSnapshot()
@@ -80,6 +81,7 @@ void LogicSnapshot::free_data()
     }
     _ch_data.clear();
     _sparse_edges.clear();
+    _sparse_last_prune = 0;
     _sparse_block_cache.clear();
     _sample_count = 0;
 
@@ -244,6 +246,7 @@ void LogicSnapshot::init_sparse(uint64_t total_sample_count, GSList *channels)
     _sparse_mode = true;
     _sparse_edges.resize(_channel_num);
     _sparse_state = 0;
+    _sparse_last_prune = 0;
     _sparse_block_cache.resize(_channel_num);
     _sample_count = 0;
     _ring_sample_count = 0;
@@ -293,7 +296,20 @@ void LogicSnapshot::append_sparse_payload(const sr_datafeed_logic &logic)
         _loop_offset = absolute_end - _total_sample_count;
         _ring_sample_count = _total_sample_count;
         _sample_count = _total_sample_count;
-        sparse_prune(_loop_offset);
+        const uint64_t prune_step = std::max<uint64_t>(
+            _samplerate > 0 ? (uint64_t)_samplerate : 24000000ULL,
+            LeafBlockSamples);
+        if (_sparse_last_prune == 0 ||
+            _loop_offset - _sparse_last_prune >= prune_step) {
+            const auto prune_start = std::chrono::steady_clock::now();
+            sparse_prune(_loop_offset);
+            _sparse_last_prune = _loop_offset;
+            const auto prune_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - prune_start).count();
+            dsv_info("LogicSnapshot sparse prune: loop_offset=%llu elapsed=%lld ms",
+                     (unsigned long long)_loop_offset,
+                     (long long)prune_elapsed_ms);
+        }
     } else {
         _ring_sample_count = absolute_end;
         _sample_count = min(absolute_end, _total_sample_count);

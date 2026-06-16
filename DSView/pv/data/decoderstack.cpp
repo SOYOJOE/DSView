@@ -826,6 +826,11 @@ bool DecoderStack::execute_native_uart_decode()
         return false;
     }
 
+    if (_session->is_loop_mode() && !_is_capture_end) {
+        dsv_info("native uart defer: loop capture is running");
+        return true;
+    }
+
     const int sig_index = dec->first_probe_index();
     decode_task_status *status = _stask_stauts;
     while (!_is_capture_end && !status->_bStop &&

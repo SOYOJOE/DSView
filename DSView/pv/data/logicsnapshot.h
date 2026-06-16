@@ -270,6 +270,7 @@ private:
     bool        _sparse_mode;
     std::vector<std::vector<struct SparseEdge>> _sparse_edges;
     uint32_t    _sparse_state;
+    uint64_t    _sparse_last_prune;
     std::vector<std::vector<uint8_t>> _sparse_block_cache;
     uint8_t     _byte_fraction;
     uint16_t    _ch_fraction;
