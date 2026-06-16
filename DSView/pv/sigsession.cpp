@@ -2232,8 +2232,7 @@ namespace pv
 
                     if (is_single_mode())
                     {
-                        if (!_is_stream_mode)
-                            bAddDecoder = true;
+                        bAddDecoder = true;
                     }
                     else if(is_repeat_mode())
                     {

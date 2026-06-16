@@ -826,8 +826,8 @@ bool DecoderStack::execute_native_uart_decode()
         return false;
     }
 
-    if (_session->is_loop_mode() && !_is_capture_end) {
-        dsv_info("native uart defer: loop capture is running");
+    if (!_is_capture_end) {
+        dsv_info("native uart defer: capture is running");
         return true;
     }
 
