@@ -640,7 +640,6 @@ add_executable(${PROJECT_NAME}
 )
 
 target_link_libraries(${PROJECT_NAME} ${DSVIEW_LINK_LIBS})
-target_link_libraries(${PROJECT_NAME} usb-1.0)
 if(WIN32)
 # Pass -mwindows so that no "DOS box" will open when PulseView is started.
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "-mwindows")
@@ -653,6 +652,32 @@ endif()
 
 message(STATUS "Output dir: ${CMAKE_CURRENT_SOURCE_DIR}/build.dir")
 set(EXECUTABLE_OUTPUT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/build.dir")
+
+set(DSVIEW_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build.dir")
+
+if(WIN32)
+	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/DSView/res" "${DSVIEW_RUNTIME_DIR}/res"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/lang" "${DSVIEW_RUNTIME_DIR}/lang"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/DSView/demo" "${DSVIEW_RUNTIME_DIR}/demo"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/libsigrokdecode4DSL/decoders" "${DSVIEW_RUNTIME_DIR}/decoders"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc25.png" "${DSVIEW_RUNTIME_DIR}/showDoc25.png"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc31.png" "${DSVIEW_RUNTIME_DIR}/showDoc31.png"
+		VERBATIM
+	)
+else()
+	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E rm -rf "${DSVIEW_RUNTIME_DIR}/res" "${DSVIEW_RUNTIME_DIR}/lang" "${DSVIEW_RUNTIME_DIR}/demo" "${DSVIEW_RUNTIME_DIR}/decoders"
+		COMMAND ${CMAKE_COMMAND} -E rm -f "${DSVIEW_RUNTIME_DIR}/showDoc25.png" "${DSVIEW_RUNTIME_DIR}/showDoc31.png"
+		COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/DSView/res" "${DSVIEW_RUNTIME_DIR}/res"
+		COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/lang" "${DSVIEW_RUNTIME_DIR}/lang"
+		COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/DSView/demo" "${DSVIEW_RUNTIME_DIR}/demo"
+		COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/libsigrokdecode4DSL/decoders" "${DSVIEW_RUNTIME_DIR}/decoders"
+		COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc25.png" "${DSVIEW_RUNTIME_DIR}/showDoc25.png"
+		COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc31.png" "${DSVIEW_RUNTIME_DIR}/showDoc31.png"
+		VERBATIM
+	)
+endif()
 
 #===============================================================================
 #= Installation
@@ -712,5 +737,3 @@ if(ENABLE_TESTS)
 	enable_testing()
 	add_test(test ${CMAKE_CURRENT_BINARY_DIR}/DSView/test/DSView-test)
 endif(ENABLE_TESTS)
-
-
