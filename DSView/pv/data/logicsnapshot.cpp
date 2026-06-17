@@ -1624,6 +1624,9 @@ QString LogicSnapshot::enabled_channel_text() const
 
 int LogicSnapshot::get_block_num()
 {
+   if (_sparse_mode)
+       return ceil(_ring_sample_count * 1.0 / LeafBlockSamples);
+
    int block = ceil((_ring_sample_count+_loop_offset) * 1.0 / LeafBlockSamples) 
             - floor(_loop_offset * 1.0 / LeafBlockSamples);
    return block;
@@ -1636,6 +1639,16 @@ uint64_t LogicSnapshot::get_block_size(int block_index)
 
     assert(block_index < block_num);
 
+    auto bytes_for_samples = [](uint64_t sample_count) -> uint64_t {
+        return (sample_count + 7) / 8;
+    };
+
+    if (_sparse_mode) {
+        const uint64_t start = (uint64_t)block_index * LeafBlockSamples;
+        const uint64_t end = min(start + LeafBlockSamples, _ring_sample_count);
+        return bytes_for_samples(end - start);
+    }
+
     if (_loop_offset > 0)
     {
         if (block_index > 0 && block_index < block_num - 1) {
@@ -1644,12 +1657,12 @@ uint64_t LogicSnapshot::get_block_size(int block_index)
         else if (block_index == 0){
             samples = min(_ring_sample_count + (_loop_offset % (uint64_t)LeafBlockSamples),
                         (uint64_t)LeafBlockSamples) - (_loop_offset % (uint64_t)LeafBlockSamples);
-            return samples/8;
+            return bytes_for_samples(samples);
         }
         else{
             samples = (_ring_sample_count + _loop_offset) - (_ring_sample_count + _loop_offset - 1)
                     / LeafBlockSamples * LeafBlockSamples;
-            return samples/8;
+            return bytes_for_samples(samples);
         }
     }
     else{
@@ -1660,7 +1673,7 @@ uint64_t LogicSnapshot::get_block_size(int block_index)
             if (_ring_sample_count % LeafBlockSamples == 0)
                 return LeafBlockSamples / 8;
             else
-                return (_ring_sample_count % LeafBlockSamples) / 8;
+                return bytes_for_samples(_ring_sample_count % LeafBlockSamples);
         }
     }    
 }
@@ -1676,16 +1689,9 @@ uint8_t *LogicSnapshot::get_block_buf(int block_index, int sig_index, bool &samp
     }
 
     if (_sparse_mode) {
-        const uint64_t absolute_block =
-            block_index + _loop_offset / LeafBlockSamples;
-        uint64_t start = absolute_block * LeafBlockSamples;
+        uint64_t start = _loop_offset + (uint64_t)block_index * LeafBlockSamples;
         const uint64_t absolute_end = _loop_offset + _ring_sample_count;
-
-        if (block_index == 0)
-            start = max(start, _loop_offset);
-
-        const uint64_t end =
-            min((absolute_block + 1) * LeafBlockSamples, absolute_end);
+        const uint64_t end = min(start + LeafBlockSamples, absolute_end);
         sample = sparse_sample(start, order);
         materialize_sparse(start, end, order, _sparse_block_cache[order]);
         return _sparse_block_cache[order].data();

@@ -397,6 +397,10 @@ public:
         return _view_data == _capture_data;
     }
 
+    inline uint64_t logic_loop_offset(){
+        return _view_data ? _view_data->get_logic()->get_loop_offset() : 0;
+    }
+
     inline void update_view(){
         _callback->data_updated();
     }

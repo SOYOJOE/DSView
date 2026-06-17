@@ -158,6 +158,7 @@ private:
     void load_channel_view_indexs(QJsonDocument &doc); 
     QJsonDocument get_config_json_from_data_file(QString file, bool &bSucesss);
     QJsonArray get_decoder_json_from_data_file(QString file, bool &bSucesss);
+    void load_uart_vcd_text_log(QString dsl_file);
     void check_config_file_version(); 
     void load_demo_decoder_config(QString optname);
 

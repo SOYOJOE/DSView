@@ -47,6 +47,7 @@
 #include <QStandardPaths>
 #include <math.h>
 #include <QTextStream>
+#include <algorithm>
 #include <list>
 
 #ifdef _WIN32
@@ -65,6 +66,11 @@
 #define DEOCDER_CONFIG_VERSION  2
  
 namespace pv { 
+
+static QString uart_vcd_text_log_file_name(const QString &dsl_file)
+{
+    return dsl_file + ".txt";
+}
 
 StoreSession::StoreSession(SigSession *session) :
 	_session(session),
@@ -224,13 +230,17 @@ void StoreSession::save_logic(pv::data::LogicSnapshot *logic_snapshot)
     bool sample;
     int ret = SR_ERR;
     int num;
+    auto bytes_for_samples = [](uint64_t sample_count) -> uint64_t {
+        return (sample_count + 7) / 8;
+    };
 
     for(auto s : _session->get_signals()) {
         if (s->enabled() && logic_snapshot->has_data(s->get_index()))
             to_save_probes++;
     }
 
-    _unit_count = logic_snapshot->get_ring_sample_count() / 8 * to_save_probes;
+    _unit_count = bytes_for_samples(logic_snapshot->get_ring_sample_count()) *
+        to_save_probes;
     num = logic_snapshot->get_block_num();
 
     uint64_t start_index = _start_index;
@@ -268,13 +278,15 @@ void StoreSession::save_logic(pv::data::LogicSnapshot *logic_snapshot)
     }
 
     if (start_index > 0 && end_index > 0){
-        _unit_count = (end_index - start_index) / 8 * to_save_probes;
+        _unit_count = bytes_for_samples(end_index - start_index) *
+            to_save_probes;
     }
     else if (start_index > 0){
-        _unit_count = (logic_snapshot->get_ring_sample_count() - start_index) / 8 * to_save_probes;
+        _unit_count = bytes_for_samples(logic_snapshot->get_ring_sample_count() -
+            start_index) * to_save_probes;
     }
     else if (end_index > 0){
-        _unit_count = end_index / 8 * to_save_probes;
+        _unit_count = bytes_for_samples(end_index) * to_save_probes;
     }
 
     for(auto s : _session->get_signals()) 
@@ -298,8 +310,9 @@ void StoreSession::save_logic(pv::data::LogicSnapshot *logic_snapshot)
                 uint64_t size = logic_snapshot->get_block_size(i);
                 bool need_malloc = (buf == NULL);
 
-                if (i == end_block && end_offset / 8 < size && end_offset > 0){
-                    size = end_offset / 8;
+                if (i == end_block && bytes_for_samples(end_offset) < size &&
+                    end_offset > 0){
+                    size = bytes_for_samples(end_offset);
                 }
 
                 if (i == start_block && start_offset > 0){
@@ -533,11 +546,104 @@ void StoreSession::save_proc(data::Snapshot *snapshot)
     else if ((dso_snapshot = dynamic_cast<data::DsoSnapshot*>(snapshot))) {
         save_dso(dso_snapshot);
     }
+
+    if (!_has_error)
+        save_uart_vcd_text_log(snapshot);
  
     dsv_info("save task end.");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     _is_busy = false;   
+}
+
+void StoreSession::save_uart_vcd_text_log(data::Snapshot *snapshot)
+{
+    const int UartVcdTextTypeBase = 1008;
+    const int UartVcdTextChannels = 4;
+    struct LogItem {
+        uint64_t start_sample;
+        uint64_t end_sample;
+        int level;
+        QString text;
+    };
+
+    std::vector<LogItem> logs;
+    uint64_t sample_offset = 0;
+    if (auto logic_snapshot = dynamic_cast<data::LogicSnapshot*>(snapshot))
+        sample_offset = logic_snapshot->get_loop_offset();
+
+    uint64_t range_start = sample_offset + _start_index;
+    uint64_t range_end = _end_index;
+    if (range_end > snapshot->get_sample_count())
+        range_end = 0;
+    if (range_end > 0)
+        range_end += sample_offset;
+
+    for (auto trace : _session->get_decode_signals()) {
+        if (trace == NULL || trace->decoder() == NULL)
+            continue;
+
+        std::vector<data::decode::Annotation> annotations;
+        trace->decoder()->list_direct_annotations(
+            annotations, UartVcdTextTypeBase,
+            UartVcdTextTypeBase + UartVcdTextChannels - 1);
+
+        for (const auto &ann : annotations) {
+            if (ann.start_sample() < range_start)
+                continue;
+            if (range_end > 0 && ann.start_sample() >= range_end)
+                continue;
+
+            const std::vector<QString> &texts = ann.annotations();
+            if (texts.empty())
+                continue;
+
+            LogItem item;
+            item.start_sample = ann.start_sample() - range_start;
+            item.end_sample = ann.end_sample() > range_start ?
+                ann.end_sample() - range_start : item.start_sample + 1;
+            item.level = ann.type() - UartVcdTextTypeBase;
+            item.text = texts.back();
+            logs.push_back(item);
+        }
+    }
+
+    const QString log_file = uart_vcd_text_log_file_name(_file_name);
+    if (logs.empty()) {
+        QFile::remove(log_file);
+        return;
+    }
+
+    std::sort(logs.begin(), logs.end(),
+        [](const LogItem &a, const LogItem &b) {
+            if (a.start_sample != b.start_sample)
+                return a.start_sample < b.start_sample;
+            return a.level < b.level;
+        });
+
+    QFile f(log_file);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        dsv_warn("Warning: Couldn't open uart-vcd log sidecar to write: %s",
+                 log_file.toUtf8().data());
+        return;
+    }
+
+    QTextStream out(&f);
+    encoding::set_utf8(out);
+    for (const auto &item : logs) {
+        QJsonObject obj;
+        obj["version"] = 1;
+        obj["sample"] = QString::number(item.start_sample);
+        obj["end_sample"] = QString::number(item.end_sample);
+        obj["level"] = item.level;
+        obj["text"] = item.text;
+        out << QString::fromUtf8(
+            QJsonDocument(obj).toJson(QJsonDocument::Compact)) << "\n";
+    }
+    f.close();
+
+    dsv_info("uart-vcd log sidecar saved: %s, count=%llu",
+             log_file.toUtf8().data(), (unsigned long long)logs.size());
 }
 
 bool StoreSession::meta_gen(data::Snapshot *snapshot, std::string &str)

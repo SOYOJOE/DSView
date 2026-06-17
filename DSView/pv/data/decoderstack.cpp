@@ -354,6 +354,26 @@ bool DecoderStack::list_annotation(pv::data::decode::Annotation *ann,
     return false;
 }
 
+void DecoderStack::list_direct_annotations(std::vector<decode::Annotation> &dest,
+                                           int type_min, int type_max)
+{
+    for (auto i = _rows.begin(); i != _rows.end(); i++) {
+        RowData *row = (*i).second;
+        if (row == NULL)
+            continue;
+
+        const uint64_t count = row->get_annotation_size();
+        for (uint64_t col = 0; col < count; col++) {
+            decode::Annotation ann;
+            if (!row->get_annotation(&ann, col))
+                continue;
+            if (ann.type() < type_min || ann.type() > type_max)
+                continue;
+            dest.push_back(ann);
+        }
+    }
+}
+
 
 bool DecoderStack::list_row_title(int row, QString &title)
 { 

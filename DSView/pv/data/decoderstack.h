@@ -129,6 +129,8 @@ public:
 
     bool list_annotation(decode::Annotation *ann,
                         uint16_t row_index, uint64_t col_index);
+    void list_direct_annotations(std::vector<decode::Annotation> &dest,
+                                 int type_min, int type_max);
 
 
     bool list_row_title(int row, QString &title);

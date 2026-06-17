@@ -278,6 +278,8 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
         root_decoder_id = _decoder_stack->stack().front()->decoder()->id;
     const bool direct_text_stack = root_decoder_id &&
         strcmp(root_decoder_id, "0:uart") == 0;
+    const uint64_t direct_text_sample_offset =
+        direct_text_stack && _session ? _session->logic_loop_offset() : 0;
 
     if (!direct_text_stack) {
         for(auto dec : _decoder_stack->stack()) {
@@ -326,8 +328,14 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
                             (max_annWidth > 10 && (min_annWidth > 1 || samples_per_pixel < 50)) ||
                             (max_annWidth == 0 && samples_per_pixel < 10)) {
                             std::vector<Annotation*> annotations;
+                            const uint64_t query_start =
+                                direct_text_row ? start_sample + direct_text_sample_offset :
+                                    start_sample;
+                            const uint64_t query_end =
+                                direct_text_row ? end_sample + direct_text_sample_offset :
+                                    end_sample;
                             _decoder_stack->get_annotation_subset(annotations, row,
-                                start_sample, end_sample);
+                                query_start, query_end);
 
                             if (!annotations.empty()) {
                                 double last_x = -1;
@@ -336,7 +344,8 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
                                     draw_annotation(*a, p, get_text_colour(),
                                         annotation_height, left, right,
                                         samples_per_pixel, pixels_offset, y,
-                                        0, min_annWidth, fore, back, last_x);
+                                        0, min_annWidth, fore, back, last_x,
+                                        direct_text_row ? direct_text_sample_offset : 0);
                                 }
                             }
                         }
@@ -371,13 +380,24 @@ void DecodeTrace::paint_fore(QPainter &p, int left, int right, QColor fore, QCol
 void DecodeTrace::draw_annotation(const pv::data::decode::Annotation &a,
     QPainter &p, QColor text_color, int h, int left, int right,
     double samples_per_pixel, double pixels_offset, int y,
-    size_t base_colour, double min_annWidth, QColor fore, QColor back, double &last_x)
+    size_t base_colour, double min_annWidth, QColor fore, QColor back,
+    double &last_x, uint64_t sample_offset)
 {
-    const double start = max(a.start_sample() / samples_per_pixel -
-        pixels_offset, (double)left);
-    double end = min(a.end_sample() / samples_per_pixel -
-        pixels_offset, (double)right);
     const bool direct_text = a.type() >= 1008 && a.type() <= 1011;
+    uint64_t display_start_sample = a.start_sample();
+    uint64_t display_end_sample = a.end_sample();
+    if (direct_text && sample_offset > 0) {
+        if (display_end_sample <= sample_offset)
+            return;
+        display_start_sample = display_start_sample > sample_offset ?
+            display_start_sample - sample_offset : 0;
+        display_end_sample -= sample_offset;
+    }
+
+    const double start = max(display_start_sample / samples_per_pixel -
+        pixels_offset, (double)left);
+    double end = min(display_end_sample / samples_per_pixel -
+        pixels_offset, (double)right);
 
     const size_t colour = ((base_colour + a.type()) % MaxAnnType) % countof(Colours);
     QColor fill = Colours[colour];
