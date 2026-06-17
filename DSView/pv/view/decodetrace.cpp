@@ -289,8 +289,10 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
                         const bool direct_text_row = row.decoder() &&
                             row.decoder()->id &&
                             strcmp(row.decoder()->id, "0:uart") == 0;
+                        const bool direct_text_detail =
+                            direct_text_row && samples_per_pixel <= 500.0;
                         
-                        if (direct_text_row ||
+                        if (direct_text_detail ||
                             (max_annWidth > 100) ||
                             (max_annWidth > 10 && (min_annWidth > 1 || samples_per_pixel < 50)) ||
                             (max_annWidth == 0 && samples_per_pixel < 10)) {
