@@ -405,7 +405,8 @@ struct sr_datafeed_uart_vcd_text {
     uint64_t start_sample;
     uint64_t end_sample;
     uint8_t channel;
-    uint8_t reserved[7];
+    uint8_t is_label;
+    uint8_t reserved[6];
     const char *text;
 };
 

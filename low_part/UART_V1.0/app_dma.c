@@ -48,10 +48,10 @@ void user_init(void)
     uart_receive_dma(0, (unsigned char *)rec_buff, sizeof(rec_buff));
 
     gpio_event_init();
-    gpio_event_send_label(0, (const uint8_t *)"Ra0:", 4);
-    gpio_event_send_label(1, (const uint8_t *)"RX1:", 4);
+    gpio_event_send_label(0, (const uint8_t *)"R90:", 4);
+    gpio_event_send_label(1, (const uint8_t *)"R21:", 4);
     gpio_event_send_label(2, (const uint8_t *)"RX2:", 4);
-    gpio_event_send_label(3, (const uint8_t *)"RX3:", 4);
+    gpio_event_send_label(3, (const uint8_t *)"R33:", 4);
     gpio_event_send_label(4, (const uint8_t *)"RX4:", 4);
     gpio_event_send_label(5, (const uint8_t *)"RX5:", 4);
     gpio_event_send_label(6, (const uint8_t *)"RX6:", 4);
@@ -63,8 +63,14 @@ void user_init(void)
 void main_loop(void)
 {
     unsigned long t = stimer_get_tick();
+    static unsigned long sync_tick = 0;
+    static int sync_inited = 0;
 
-    gpio_event_send_sync();
+    if (!sync_inited || clock_time_exceed(sync_tick, 10000)) {
+        gpio_event_send_sync();
+        sync_tick = t;
+        sync_inited = 1;
+    }
 
     gpio_set_high_level(LED1);
     for (int i = 0; i < 24; i++) {
@@ -73,16 +79,16 @@ void main_loop(void)
     gpio_set_low_level(LED1);
 
     gpio_set_high_level(LED2);
-    // static uint8_t data[] = {0, 'a', 'l', 'u', 'e'};
-    // for (int i = 0; i < 8; i++) {
-    //     int mode = (i < 4) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
-    //     gpio_event_send_text(i, mode, data, 5);
-    // }
-    // data[0]++;
+    static uint8_t data[] = {0, 'a'};
+    for (int i = 0; i < 8; i++) {
+        int mode = (i < 4) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
+        gpio_event_send_text(i, mode, data, 2);
+    }
+    data[0]++;
     gpio_set_low_level(LED2);
 
     uart_tx_poll();
 
-    while (!clock_time_exceed(t, 500)) {
+    while (!clock_time_exceed(t, 1000)) {
     }
 }

@@ -255,10 +255,6 @@ static void emit_text_annotation(struct uart_vcd_context *ctx,
     if (channel < 0 || channel > 7)
         return;
 
-    for (i = 0; ctx->labels[channel][i] != '\0' &&
-                pos + 1 < sizeof(out); i++)
-        out[pos++] = ctx->labels[channel][i];
-
     if (render_hex) {
         static const char hexc[] = "0123456789ABCDEF";
         for (i = 0; i < data_len && pos + 2 < sizeof(out); i++) {
@@ -274,8 +270,33 @@ static void emit_text_annotation(struct uart_vcd_context *ctx,
     text.start_sample = ctx->collected_samples;
     text.end_sample = ctx->collected_samples + 1;
     text.channel = (uint8_t)channel;
+    text.is_label = 0;
     memset(text.reserved, 0, sizeof(text.reserved));
     text.text = out;
+
+    pkt.type = SR_DF_UART_VCD_TEXT;
+    pkt.status = SR_PKT_OK;
+    pkt.payload = &text;
+    pkt.bExportOriginalData = 0;
+    ds_data_forward(sdi, &pkt);
+}
+
+static void emit_label_update(struct uart_vcd_context *ctx,
+                              const struct sr_dev_inst *sdi,
+                              int channel)
+{
+    struct sr_datafeed_packet pkt;
+    struct sr_datafeed_uart_vcd_text text;
+
+    if (channel < 0 || channel > 7 || ctx->labels[channel][0] == '\0')
+        return;
+
+    text.start_sample = ctx->collected_samples;
+    text.end_sample = ctx->collected_samples + 1;
+    text.channel = (uint8_t)channel;
+    text.is_label = 1;
+    memset(text.reserved, 0, sizeof(text.reserved));
+    text.text = ctx->labels[channel];
 
     pkt.type = SR_DF_UART_VCD_TEXT;
     pkt.status = SR_PKT_OK;
@@ -344,6 +365,7 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
         memcpy(ctx->labels[channel], p + 6, (size_t)copy_len);
         ctx->labels[channel][copy_len] = '\0';
         ctx->labels_received[channel] = TRUE;
+        emit_label_update(ctx, sdi, channel);
     } else {
         const int channel = p[4];
         const int data_len = p[5];

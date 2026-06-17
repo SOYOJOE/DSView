@@ -16,11 +16,11 @@
 
 #define UART_VCD_DEFAULT_TCP_PORT    12345
 #define UART_VCD_DEFAULT_TCP_HOST    "192.168.100.135"
-#define UART_VCD_NUM_PROBES          32
+#define UART_VCD_NUM_PROBES          24
 #define UART_VCD_BUFSIZE             (1024 * 1024)
 #define UART_VCD_EVENT_SAMPLERATE_DEFAULT  24000000
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
-#define UART_VCD_MAX_HW_DEPTH             SR_Mn(2500)
+#define UART_VCD_MAX_HW_DEPTH             SR_Mn(25000)
 #define UART_VCD_EVENT_BATCH_SIZE    4096
 #define UART_VCD_MAX_LABEL_LEN       128
 
@@ -60,7 +60,6 @@ static const char *uart_vcd_probe_names[] = {
     "D0",  "D1",  "D2",  "D3",  "D4",  "D5",  "D6",  "D7",
     "D8",  "D9",  "D10", "D11", "D12", "D13", "D14", "D15",
     "D16", "D17", "D18", "D19", "D20", "D21", "D22", "D23",
-    "RX0", "RX1", "RX2", "RX3", "RX4", "RX5", "RX6", "RX7",
     NULL,
 };
 

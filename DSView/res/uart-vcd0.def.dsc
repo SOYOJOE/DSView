@@ -10,7 +10,7 @@
     "Max Height": "1X",
     "Operation Mode": 1,
     "Sample count": "2500000000",
-    "Sample rate": "6000000",
+    "Sample rate": "24000000",
     "Stop Options": 1,
     "Threshold Level": "1",
     "Title": "DSView v1.3.2",
@@ -46,15 +46,7 @@
         {"colour":"default","enabled":true,"index":20,"name":"D20","strigger":0,"type":10000,"view_index":20},
         {"colour":"default","enabled":true,"index":21,"name":"D21","strigger":0,"type":10000,"view_index":21},
         {"colour":"default","enabled":true,"index":22,"name":"D22","strigger":0,"type":10000,"view_index":22},
-        {"colour":"default","enabled":true,"index":23,"name":"D23","strigger":0,"type":10000,"view_index":23},
-        {"colour":"default","enabled":true,"index":24,"name":"RX0","strigger":0,"type":10000,"view_index":24},
-        {"colour":"default","enabled":true,"index":25,"name":"RX1","strigger":0,"type":10000,"view_index":26},
-        {"colour":"default","enabled":true,"index":26,"name":"RX2","strigger":0,"type":10000,"view_index":28},
-        {"colour":"default","enabled":true,"index":27,"name":"RX3","strigger":0,"type":10000,"view_index":30},
-        {"colour":"default","enabled":true,"index":28,"name":"RX4","strigger":0,"type":10000,"view_index":32},
-        {"colour":"default","enabled":true,"index":29,"name":"RX5","strigger":0,"type":10000,"view_index":34},
-        {"colour":"default","enabled":true,"index":30,"name":"RX6","strigger":0,"type":10000,"view_index":36},
-        {"colour":"default","enabled":true,"index":31,"name":"RX7","strigger":0,"type":10000,"view_index":38}
+        {"colour":"default","enabled":true,"index":23,"name":"D23","strigger":0,"type":10000,"view_index":23}
     ],
     "decoder": [
         {
@@ -82,7 +74,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 25
+            "view_index": 24
         },
         {
             "channel": [{"rxtx": 25}],
@@ -109,7 +101,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 27
+            "view_index": 25
         },
         {
             "channel": [{"rxtx": 26}],
@@ -136,7 +128,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 29
+            "view_index": 26
         },
         {
             "channel": [{"rxtx": 27}],
@@ -163,7 +155,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 31
+            "view_index": 27
         },
         {
             "channel": [{"rxtx": 28}],
@@ -190,7 +182,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 33
+            "view_index": 28
         },
         {
             "channel": [{"rxtx": 29}],
@@ -217,7 +209,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 35
+            "view_index": 29
         },
         {
             "channel": [{"rxtx": 30}],
@@ -244,7 +236,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 37
+            "view_index": 30
         },
         {
             "channel": [{"rxtx": 31}],
@@ -271,7 +263,7 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 39
+            "view_index": 31
         }
     ],
     "trigger": {

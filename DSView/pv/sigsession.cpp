@@ -60,6 +60,8 @@
 
 namespace pv
 {
+    static const int UartVcdTextProbeOffset = 24;
+
     SessionData::SessionData()
     {
         _cur_snap_samplerate = 0;
@@ -884,7 +886,6 @@ namespace pv
         _view_data->clear();
         set_cur_snap_samplerate(_device_agent.get_sample_rate());
         set_cur_samplelimits(_device_agent.get_sample_limit());    
-
         // Detect what data types we will receive
         if (_device_agent.have_instance())
         {
@@ -966,6 +967,54 @@ namespace pv
         if (_signals.empty()){
             dsv_info("ERROR: Unable to create any channel.");
         }        
+    }
+
+    bool SigSession::update_uart_vcd_decoder_label(int channel,
+                                                   const QString &label)
+    {
+        const int target_probe = UartVcdTextProbeOffset + channel;
+        bool changed = false;
+
+        for (auto trace : _decode_traces) {
+            if (trace == NULL || trace->decoder() == NULL)
+                continue;
+
+            data::DecoderStack *stack = trace->decoder();
+            if (stack->stack().empty())
+                continue;
+
+            data::decode::Decoder *dec = stack->stack().front();
+            if (dec == NULL || dec->first_probe_index() != target_probe)
+                continue;
+
+            if (trace->get_name() != label) {
+                set_trace_name(trace, label);
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    void SigSession::update_uart_vcd_label(int channel, const QString &label)
+    {
+        if (channel < 0 || channel >= 8 || label.trimmed().isEmpty())
+            return;
+
+        const int probe_index = UartVcdTextProbeOffset + channel;
+        bool changed = false;
+        view::Trace *trace = get_channel_by_index(probe_index);
+        if (trace != NULL && trace->get_name() != label) {
+            set_trace_name(trace, label);
+            changed = true;
+        }
+
+        if (update_uart_vcd_decoder_label(channel, label))
+            changed = true;
+
+        if (changed) {
+            signals_changed();
+        }
     }
 
     void SigSession::reload()
@@ -1267,11 +1316,18 @@ namespace pv
             return;
         }
 
-        const int target_probe = 24 + (int)o.channel;
+        const int target_probe = UartVcdTextProbeOffset + (int)o.channel;
         const uint64_t start = o.start_sample;
         const uint64_t end = o.end_sample > o.start_sample ?
             o.end_sample : o.start_sample + 1;
         const QString text = QString::fromUtf8(o.text);
+
+        if (o.is_label) {
+            update_uart_vcd_label((int)o.channel, text);
+            dsv_info("uart_vcd label update: channel=%u label=%s",
+                     (unsigned int)o.channel, o.text);
+            return;
+        }
 
         for (auto trace : _decode_traces) {
             if (trace == NULL || trace->decoder() == NULL)
