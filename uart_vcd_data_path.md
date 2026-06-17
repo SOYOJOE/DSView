@@ -28,27 +28,28 @@ MCU 的 24 MHz `stimer_get_tick()` 与 DSView 的 24 MHz sample 一一对应。
 
 ## 2. Protocol v3
 
-每个事件以 2-byte magic 加 3-byte little-endian delta tick 开头：
+普通事件以 3-byte little-endian delta tick 开头：
 
 ```text
-[0xA5][0x5A][delta_ticks:3][header:1][optional payload]
+[delta_ticks:3][header:1][optional payload]
 ```
 
-GPIO 事件固定为 6 bytes：
+GPIO 事件固定为 4 bytes：
 
 ```text
-[0xA5][0x5A][delta:3][header:1]
+[delta:3][header:1]
 ```
 
 direct text 事件为：
 
 ```text
-label: [0xA5][0x5A][delta:3][0x80][channel:1][label_len:1][label][padding]
-text:  [0xA5][0x5A][delta:3][0xC0/0xE0][channel:1][data_len:1][data][padding]
+label: [delta:3][0x80][channel:1][label_len:1][label][padding]
+sync:  [delta:3][0xA0][gpio_state24:3][inv_gpio_state24:3][0x55][0xAA]
+text:  [delta:3][0xC0/0xE0][channel:1][data_len:1][data][padding]
 ```
 
-`A5 5A` 用于 PC 端重同步，避免 text payload 中的普通字节被误判为 GPIO
-事件。
+普通帧不带 per-frame magic。MCU 周期性发送 `0xA0` sync 帧，PC 收到错包后
+丢弃到下一个合法 sync 帧，再用其中的绝对 GPIO state 恢复。
 
 PC 端通过 `SR_DF_UART_VCD_TEXT` 直接推入 decoder annotation row，不再为
 RX0-RX7 合成 8N1 波形。完整定义见 `test_uart_vcd_event_protocol_v3.md`。
@@ -76,7 +77,7 @@ RX0-RX7 合成 8N1 波形。完整定义见 `test_uart_vcd_event_protocol_v3.md`
 
 `ev3_blow_buf()` 完成一个事件的解析：
 
-1. 校验 `A5 5A` sync word，读取 24-bit delta。
+1. 读取 24-bit delta 和 header。
 2. 将绝对采样时间推进 delta，但不生成空闲采样。
 3. GPIO 事件再更新 GPIO 状态。
 4. text 事件直接发送 `SR_DF_UART_VCD_TEXT` annotation packet。
@@ -114,13 +115,13 @@ python3 send_event_test.py gpio-uart-1k \
   --payload-mbps 2.1 --duration 10
 ```
 
-该场景每毫秒固定产生 256 bytes protocol payload：
+该场景每毫秒固定产生 204 bytes protocol payload：
 
 ```text
-24 GPIO events * 6 bytes + 8 text events * 14 bytes = 256 bytes/ms
+24 GPIO events * 4 bytes + 8 text events * 12 bytes + 1 sync event * 12 bytes = 204 bytes/ms
 ```
 
-即 2.048 Mbps TCP payload；如果按物理 8N1 串口计算，需要 2.56 Mbaud。
+即 1.632 Mbps TCP payload；如果按物理 8N1 串口计算，需要 2.04 Mbaud。
 驱动每 0.25 秒逻辑时间输出一次 `activity` 掩码。v3 direct text 不再生成
 RX0-RX7 波形，所以正常复合测试的 GPIO activity 应为 `0x00ffffff`；RX 文本
 是否进入 UI 需要看 `uart_vcd text annotation...` 日志。
@@ -130,7 +131,8 @@ RX0-RX7 波形，所以正常复合测试的 GPIO activity 应为 `0x00ffffff`�
 或输入缓冲溢出也只报告并丢弃受影响的数据，不再发送会终止 UI 会话的
 `SR_DF_OVERFLOW`。
 
-重新同步优先使用完整 label/text event 作为强边界。
+重新同步只使用完整 sync event 作为强边界，不从 payload 中猜测 GPIO/text
+边界。
 
 稀疏事件包的 UI 接收进度按 `LogicSnapshot` 实际增加的 sample 数计算，不再
 把 16-byte sparse record 错当成普通 32 通道位图数据。
@@ -295,10 +297,10 @@ GPIO，压缩比可达到数千倍。
 
 ### 7.6 Protocol v3 评估
 
-当前 protocol v3 的 GPIO event 固定 6 bytes：
+当前 protocol v3 的 GPIO event 固定 4 bytes：
 
 ```text
-magic16 + uint24 delta + header(channel/sub-mode)
+uint24 delta + header(channel/sub-mode)
 ```
 
 对 24 MHz timer 来说，1 ms delta 是 24,000 ticks，仍需要 3 bytes。改成
@@ -328,7 +330,8 @@ varint 只能在更短 delta 下省 1-2 bytes，但会增加 MCU/PC 分支和重
 
 未实现：
 
-- mode 2 multi-GPIO mask。
+- multi-GPIO mask，需要新 header 或版本化 sync payload，避免占用当前 `0xA0`
+  sync 帧。
 - v3 专用 TCP 测试发送器。
 - 不依赖 UART decoder 的专用 text row。
 

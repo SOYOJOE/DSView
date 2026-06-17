@@ -16,13 +16,13 @@ MCU -> UART 3 Mbps -> serial_bridge.py -> TCP :12345
 
 ## 当前协议
 
-底层帧为 v3-only magic 同步帧：
+底层普通帧为 v3-only 无 magic 事件帧：
 
 ```text
-[0xA5][0x5A][uint24_le delta_ticks][header][payload]
+[uint24_le delta_ticks][header][payload]
 ```
 
-- `A5 5A` 用于错包后的重同步，避免 payload 被误判为事件头。
+- `0xA0` sync 帧用于错包后的重同步，避免 payload 被误判为事件头后长期漂移。
 - timer/sample rate：24 MHz。
 - D0-D23：GPIO low/high/toggle，MCU toggle 在本地转换为 absolute high/low。
 - v3 direct text 是当前唯一协议：MCU 先发 label event，再发 text event；PC 通过
@@ -30,9 +30,10 @@ MCU -> UART 3 Mbps -> serial_bridge.py -> TCP :12345
   decoder。
 
 ```text
-v3 gpio:  [A5 5A][delta][header] = 6 bytes
-v3 label: [A5 5A][delta][0x80][channel][label_len][label][padding]
-v3 text:  [A5 5A][delta][0xC0/0xE0][channel][data_len][data][padding]
+v3 gpio:  [delta][header] = 4 bytes
+v3 sync:  [delta][0xA0][gpio_state24][inv_gpio_state24][0x55][0xAA] = 12 bytes
+v3 label: [delta][0x80][channel][label_len][label][padding]
+v3 text:  [delta][0xC0/0xE0][channel][data_len][data][padding]
 ```
 
 v3 详细定义见 `test_uart_vcd_event_protocol_v3.md`。
@@ -92,7 +93,7 @@ DSView: LogicSnapshot sparse prune: loop_offset=... elapsed=... ms
 
 ## 协议注意点
 
-- GPIO event 固定 6 bytes，当前对 24 MHz delta + channel + high/low 来说
+- GPIO event 固定 4 bytes，当前对 24 MHz delta + channel + high/low 来说
   已经比较紧凑，主要瓶颈不在 GPIO event 编码。
 - v3 direct text 已去掉 8N1 合成和 UART decoder 重解码开销。
 - HEX render 会把每个 data byte 放大为两个 ASCII 字符；能用 ASCII 时优先用

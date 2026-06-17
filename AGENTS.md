@@ -50,14 +50,14 @@ cmake --build cmake-build-debug-system-gcc13
 
 ### Protocol support
 ```
-[0xA5] [0x5A] [uint24_le delta_ticks:3B] [header:1B] [payload...]
+[uint24_le delta_ticks:3B] [header:1B] [payload...]
 ```
-- `A5 5A`: v3 sync word; PC drops bad bytes until the next valid sync word
 - delta_ticks: raw 24MHz systimer ticks (MCU `stimer_get_tick()`), PC maps 1:1 to samples
 - Samplerate: 24MHz (matching MCU timer resolution)
 - v3 direct text is the only supported protocol; see `test_uart_vcd_event_protocol_v3.md`
 
-**GPIO** (mode=0): sub=low(0)/high(1), param=channel(0-23), total=6B
+**GPIO** (mode=0): sub=low(0)/high(1), param=channel(0-23), total=4B
+**Sync**: `0xA0`, 12B absolute GPIO state frame; PC drops bad bytes until the next valid sync frame
 **v3 Text**: label event `0x80`, text event `0xC0` HEX / `0xE0` ASCII;
   PC emits `SR_DF_UART_VCD_TEXT` instead of synthesizing 8N1 waveform
 

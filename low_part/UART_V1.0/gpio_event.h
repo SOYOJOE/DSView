@@ -66,6 +66,7 @@ void gpio_event_irq_low(unsigned int channel);
 void gpio_event_irq_toggle(unsigned int channel);
 
 void gpio_event_send_label(int channel, const uint8_t *label, int label_len);
+void gpio_event_send_sync(void);
 void gpio_event_send_text(int channel, int render_mode,
                           const uint8_t *data, int data_len);
 void gpio_event_tx(void);

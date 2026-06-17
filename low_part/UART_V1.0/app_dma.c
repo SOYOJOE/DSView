@@ -64,6 +64,8 @@ void main_loop(void)
 {
     unsigned long t = stimer_get_tick();
 
+    gpio_event_send_sync();
+
     gpio_set_high_level(LED1);
     for (int i = 0; i < 24; i++) {
         gpio_event_toggle(i);
@@ -71,16 +73,16 @@ void main_loop(void)
     gpio_set_low_level(LED1);
 
     gpio_set_high_level(LED2);
-    static uint8_t data[] = {0, 'a', 'l', 'u', 'e'};
-    for (int i = 0; i < 8; i++) {
-        int mode = (i < 4) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
-        gpio_event_send_text(i, mode, data, 5);
-    }
-    data[0]++;
+    // static uint8_t data[] = {0, 'a', 'l', 'u', 'e'};
+    // for (int i = 0; i < 8; i++) {
+    //     int mode = (i < 4) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
+    //     gpio_event_send_text(i, mode, data, 5);
+    // }
+    // data[0]++;
     gpio_set_low_level(LED2);
 
     uart_tx_poll();
 
-    while (!clock_time_exceed(t, 1000)) {
+    while (!clock_time_exceed(t, 500)) {
     }
 }

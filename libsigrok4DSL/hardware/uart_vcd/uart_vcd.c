@@ -25,10 +25,10 @@
 
 #define UART_VCD_READ_BUF_SIZE          65536
 #define UART_VCD_EVENT_LIMIT            65536
-#define UART_VCD_MAGIC0                 0xA5
-#define UART_VCD_MAGIC1                 0x5A
 #define UART_VCD_DELTA_CLAMP            0x00ffffffu
-#define UART_VCD_MAX_EVENT_SIZE         266
+#define UART_VCD_MAX_EVENT_SIZE         264
+#define UART_VCD_SYNC_FRAME_SIZE        12
+#define UART_VCD_HEADER_SYNC            0xA0
 #define UART_VCD_ERROR_DUMP_SIZE        32
 #define UART_VCD_TEXT_BUF_SIZE          1200
 
@@ -163,48 +163,56 @@ static int ev3_frame_size(const struct uart_vcd_context *ctx,
     int frame_size;
     int i;
 
-    if (len < 2)
-        return 0;
-    if (p[0] != UART_VCD_MAGIC0 || p[1] != UART_VCD_MAGIC1)
-        return -1;
-    if (len < 6)
+    if (len < 4)
         return 0;
 
-    delta_raw = (uint32_t)p[2] | ((uint32_t)p[3] << 8) |
-                ((uint32_t)p[4] << 16);
+    delta_raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                ((uint32_t)p[2] << 16);
     if (!ctx->first_event && delta_raw > UART_VCD_DELTA_CLAMP)
         return -1;
 
-    header = p[5];
+    header = p[3];
     if (!(header & 0x80)) {
         const uint8_t sub = (header >> 5) & 3;
         const uint8_t channel = header & 0x1F;
         if (sub > 1 || channel > 23)
             return -1;
-        return 6;
+        return 4;
     }
 
-    if (header == 0xA0)
-        return -1;
+    if (header == UART_VCD_HEADER_SYNC) {
+        uint32_t state, inv_state;
+        if (len < UART_VCD_SYNC_FRAME_SIZE)
+            return 0;
+        state = (uint32_t)p[4] | ((uint32_t)p[5] << 8) |
+                ((uint32_t)p[6] << 16);
+        inv_state = (uint32_t)p[7] | ((uint32_t)p[8] << 8) |
+                    ((uint32_t)p[9] << 16);
+        if (((state ^ inv_state) & 0x00ffffffu) != 0x00ffffffu)
+            return -1;
+        if (p[10] != 0x55 || p[11] != 0xAA)
+            return -1;
+        return UART_VCD_SYNC_FRAME_SIZE;
+    }
     if (header != 0x80 && header != 0xC0 && header != 0xE0)
         return -1;
 
-    if (len < 8)
+    if (len < 6)
         return 0;
-    if (p[6] > 7)
+    if (p[4] > 7)
         return -1;
-    if (header == 0x80 && p[7] > UART_VCD_MAX_LABEL_LEN - 1)
+    if (header == 0x80 && p[5] > UART_VCD_MAX_LABEL_LEN - 1)
         return -1;
 
-    payload_onwire = 2 + p[7];
+    payload_onwire = 2 + p[5];
     payload_padded = (payload_onwire + 3) & ~3;
-    frame_size = 6 + payload_padded;
+    frame_size = 4 + payload_padded;
     if (frame_size > UART_VCD_MAX_EVENT_SIZE)
         return -1;
     if (len < frame_size)
         return 0;
 
-    for (i = 6 + payload_onwire; i < frame_size; i++) {
+    for (i = 4 + payload_onwire; i < frame_size; i++) {
         if (p[i] != 0)
             return -1;
     }
@@ -288,8 +296,8 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
     if (frame_size <= 0)
         return frame_size;
 
-    delta_raw = (uint32_t)p[2] | ((uint32_t)p[3] << 8) |
-                ((uint32_t)p[4] << 16);
+    delta_raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                ((uint32_t)p[2] << 16);
     delta_samples = delta_raw;
     if (ctx->first_event) {
         ctx->first_event = FALSE;
@@ -298,7 +306,7 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
         delta_samples = 1;
     }
 
-    header = p[5];
+    header = p[3];
     if (!(header & 0x80)) {
         const uint8_t sub = (header >> 5) & 3;
         const int channel = header & 0x1F;
@@ -316,24 +324,35 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
                 (ctx->output_state & 0xff000000u) | ctx->gpio_state;
             record_state(ctx, sdi);
         }
+    } else if (header == UART_VCD_HEADER_SYNC) {
+        const uint32_t state = (uint32_t)p[4] |
+            ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16);
+        uint64_t target = ctx->collected_samples + delta_samples;
+        if (!ctx->is_loop && target > ctx->total_samples)
+            target = ctx->total_samples;
+        advance_time(ctx, target);
+        ctx->gpio_state = state & 0x00ffffffu;
+        ctx->output_state =
+            (ctx->output_state & 0xff000000u) | ctx->gpio_state;
+        record_state(ctx, sdi);
     } else if (header == 0x80) {
-        const int channel = p[6];
-        const int label_len = p[7];
+        const int channel = p[4];
+        const int label_len = p[5];
         int copy_len = label_len;
         if (copy_len > UART_VCD_MAX_LABEL_LEN - 1)
             copy_len = UART_VCD_MAX_LABEL_LEN - 1;
-        memcpy(ctx->labels[channel], p + 8, (size_t)copy_len);
+        memcpy(ctx->labels[channel], p + 6, (size_t)copy_len);
         ctx->labels[channel][copy_len] = '\0';
         ctx->labels_received[channel] = TRUE;
     } else {
-        const int channel = p[6];
-        const int data_len = p[7];
+        const int channel = p[4];
+        const int data_len = p[5];
         uint64_t target = ctx->collected_samples + delta_samples;
         if (!ctx->is_loop && target > ctx->total_samples)
             target = ctx->total_samples;
         advance_time(ctx, target);
         emit_text_annotation(ctx, sdi, channel, header == 0xC0,
-                             p + 8, data_len);
+                             p + 6, data_len);
     }
 
     ctx->parsed_events++;
@@ -359,17 +378,15 @@ static uint64_t ev3_resync_offset(const struct uart_vcd_context *ctx,
 {
     uint64_t offset;
 
-    for (offset = 1; offset + 1 < len; offset++) {
-        if (p[offset] != UART_VCD_MAGIC0 ||
-            p[offset + 1] != UART_VCD_MAGIC1)
-            continue;
+    for (offset = 1; offset + UART_VCD_SYNC_FRAME_SIZE <= len; offset++) {
         int frame_size = ev3_frame_size(ctx, p + offset, (int)(len - offset));
-        if (frame_size > 0)
+        if (frame_size == UART_VCD_SYNC_FRAME_SIZE &&
+            p[offset + 3] == UART_VCD_HEADER_SYNC)
             return offset;
     }
 
-    return len > UART_VCD_MAX_EVENT_SIZE ?
-        len - UART_VCD_MAX_EVENT_SIZE : 0;
+    return len > UART_VCD_SYNC_FRAME_SIZE - 1 ?
+        len - (UART_VCD_SYNC_FRAME_SIZE - 1) : 0;
 }
 
 /* ─── TCP ─── */
@@ -623,7 +640,7 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
 
         while (ctx->collecting && ec < UART_VCD_EVENT_LIMIT) {
 
-            while (ctx->collecting && ctx->input_len >= 2 &&
+            while (ctx->collecting && ctx->input_len >= 4 &&
                    ec < UART_VCD_EVENT_LIMIT) {
                 int c=ev3_blow_buf(ctx, sdi,
                     ctx->input_buf + ctx->input_offset,
@@ -636,6 +653,10 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
                         break;
                     protocol_error(ctx, "invalid framing",
                         ctx->input_buf + ctx->input_offset, skip);
+                    if (skip + UART_VCD_SYNC_FRAME_SIZE <= ctx->input_len &&
+                        ctx->input_buf[ctx->input_offset + skip + 3] ==
+                            UART_VCD_HEADER_SYNC)
+                        ctx->recovered_packets++;
                     ctx->input_offset += skip;
                     ctx->input_len -= skip;
                     continue;
