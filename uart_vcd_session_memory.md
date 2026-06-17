@@ -2,6 +2,14 @@
 
 更新时间：2026-06
 
+> Current implementation note: UART_VCD now uses 28 GPIO channels (D0-D27)
+> plus 4 direct LOG render channels (DEBUG/INFO/WARN/ERROR). The old `0x80`
+> label frame and `gpio_event_send_label()` API are deprecated/removed. Direct
+> text uses `0xC0/0xE0` frames carrying
+> `[level][label_len][data_len][label][data]`. `.dsl` saving stores direct logs
+> in `capture.dsl.txt` and loop-mode rendering/export accounts for
+> `LogicSnapshot::get_loop_offset()`.
+
 ## 架构
 
 ```text
@@ -24,16 +32,15 @@ MCU -> UART 3 Mbps -> serial_bridge.py -> TCP :12345
 
 - `0xA0` sync 帧用于错包后的重同步，避免 payload 被误判为事件头后长期漂移。
 - timer/sample rate：24 MHz。
-- D0-D23：GPIO low/high/toggle，MCU toggle 在本地转换为 absolute high/low。
-- v3 direct text 是当前唯一协议：MCU 先发 label event，再发 text event；PC 通过
+- D0-D27：GPIO low/high/toggle，MCU toggle 在本地转换为 absolute high/low。
+- 4 个 direct LOG render 通道：DEBUG、INFO、WARN、ERROR。PC 通过
   `SR_DF_UART_VCD_TEXT` 直接推入 annotation row，不再合成 8N1，也不运行 UART
   decoder。
 
 ```text
 v3 gpio:  [delta][header] = 4 bytes
-v3 sync:  [delta][0xA0][gpio_state24][inv_gpio_state24][0x55][0xAA] = 12 bytes
-v3 label: [delta][0x80][channel][label_len][label][padding]
-v3 text:  [delta][0xC0/0xE0][channel][data_len][data][padding]
+v3 sync:  [delta][0xA0][gpio_state32][inv_gpio_state32][0x55][0xAA][0x5A][0xA5] = 16 bytes
+v3 text:  [delta][0xC0/0xE0][level][label_len][data_len][label][data][padding]
 ```
 
 v3 详细定义见 `test_uart_vcd_event_protocol_v3.md`。
@@ -57,7 +64,7 @@ v3 详细定义见 `test_uart_vcd_event_protocol_v3.md`。
 | MCU/bridge UART | 3,000,000 baud |
 | TCP port | 12345 |
 | sample rate | 24,000,000 samples/s |
-| channel count | 32 |
+| channel count | 28 GPIO + 4 LOG render traces |
 | input buffer | 1 MiB |
 | sparse event | 16 bytes：absolute sample + 32-bit state |
 | event batch | 4,096 records / 64 KiB |
@@ -85,7 +92,8 @@ DSView: LogicSnapshot sparse prune: loop_offset=... elapsed=... ms
 - 保存和导出仍会按块临时物化位图，使用后立即释放。
 - PC parser 遇到非法帧会打印错包、重新同步并继续采集。
 - DSL RLE 是 FPGA 侧能力，不能直接解决 UART_VCD Snapshot 内存。
-- UART_VCD 当前忽略 channel disable，默认按全部 32 通道存储。
+- UART_VCD 当前按 28 个 GPIO 逻辑通道存储；4 个 LOG 通道是 direct annotation，
+  不进入逻辑位图。
 - 默认 profile 的 sample rate/decoder baud 可能与驱动常量漂移，修改配置时需
   同时核对 `uart_vcd.h` 和 `DSView/res/uart-vcd0.def.dsc`。
 - `send_event_test.py` 是旧 protocol v2 TCP 测试服务器；v3 需要补充新的测试发送器。
@@ -98,7 +106,8 @@ DSView: LogicSnapshot sparse prune: loop_offset=... elapsed=... ms
 - v3 direct text 已去掉 8N1 合成和 UART decoder 重解码开销。
 - HEX render 会把每个 data byte 放大为两个 ASCII 字符；能用 ASCII 时优先用
   ASCII，可直接减少 RX 边沿和后续解码工作。
-- MCU 当前只保留 `gpio_event_send_label()` 和 `gpio_event_send_text()` 文本接口。
+- MCU 当前只保留 `gpio_event_send_text(gpio_event_level_t,
+  gpio_event_render_mode_t, label, label_len, data, data_len)` 文本接口。
 
 ## 构建
 

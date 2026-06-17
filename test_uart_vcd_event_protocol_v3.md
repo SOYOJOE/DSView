@@ -2,9 +2,9 @@
 
 ## 1. Goal
 
-v3 extended keeps the low-cost GPIO event path from v2, and replaces RX0-RX3
-virtual 8N1 waveform synthesis with direct log annotations. The implementation
-is intentionally small:
+v3 extended keeps the low-cost GPIO event path from v2, and replaces virtual
+8N1 waveform synthesis with four direct LOG annotation channels. The
+implementation is intentionally small:
 
 - mode 0: single GPIO high/low event
 - mode 2: sync/resync absolute GPIO state
@@ -149,6 +149,13 @@ whose first probe index is `28 + level`. If no matching stack exists, it
 prints a diagnostic and drops the annotation. It must not inject text into an
 unrelated decoder stack.
 
+Live UART_VCD log annotations are stored with absolute 24 MHz sample ticks.
+In loop mode, `LogicSnapshot` displays the visible window as sample
+`0..ring_sample_count` while internally reading sparse edges at
+`visible_sample + loop_offset`. Direct log rendering must use the same mapping:
+query annotations at `visible_range + loop_offset`, then draw them at
+`annotation_sample - loop_offset`.
+
 `DecoderStack::push_native_annotation()` must be public or wrapped by a public
 method for this route.
 
@@ -202,7 +209,37 @@ The PC parser must reject:
 On bad packets, the PC prints a bounded hex dump, searches for the next valid
 sync frame, drops only bytes before that sync frame, and continues acquisition.
 
-## 10. Implementation Order
+## 10. Session Save / Load
+
+The `.dsl` zip stores logic sample data and decoder/session configuration, but
+direct UART_VCD log annotations are not part of `LogicSnapshot`. DSView stores
+them in a sidecar text file with the same base name:
+
+```text
+capture.dsl
+capture.dsl.txt
+```
+
+The sidecar is UTF-8 JSON Lines, one log annotation per line:
+
+```json
+{"version":1,"sample":"12345","end_sample":"12346","level":3,"text":"E:assert failed"}
+```
+
+Rules:
+
+- `sample` and `end_sample` are saved on the `.dsl` visible time axis.
+- `level` is 0..3 for DEBUG, INFO, WARN, ERROR.
+- `text` is the final PC-rendered annotation text (`label + rendered_data`).
+- If no UART_VCD logs exist, saving removes any stale `capture.dsl.txt`.
+- Opening `capture.dsl` silently attempts to open `capture.dsl.txt`; missing
+  sidecar files are ignored.
+- Loaded sidecar records are re-injected through `push_direct_annotation()` so
+  UI rendering, colors, and row routing stay identical to live capture.
+- In loop mode, sidecar export subtracts `LogicSnapshot::get_loop_offset()` so
+  the saved text log aligns with the saved `.dsl` waveform.
+
+## 11. Implementation Order
 
 1. Add `SR_DF_UART_VCD_TEXT` and route it through `SigSession`.
 2. Make native annotation injection callable from `SigSession`.
@@ -210,4 +247,7 @@ sync frame, drops only bytes before that sync frame, and continues acquisition.
 4. Add MCU `gpio_event_send_text()`.
 5. Update `app_dma.c` to use log events.
 6. Test that RX annotations display after capture without native UART decode.
-7. Only then revisit multi-GPIO mask or multi-string grouping.
+7. Add `.dsl.txt` sidecar save/load for direct log annotations.
+8. Verify single and loop-mode captures: live render, saved `.dsl`, and
+   reloaded `.dsl.txt` must use the same visible tick axis.
+9. Only then revisit multi-GPIO mask or multi-string grouping.

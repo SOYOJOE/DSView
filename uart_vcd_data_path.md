@@ -1,5 +1,11 @@
 # UART_VCD 当前数据通路与内存分析
 
+> Current implementation note: UART_VCD now uses 28 GPIO channels (D0-D27)
+> plus 4 direct LOG render traces. The old RX0-RX7 waveform/label model is
+> obsolete. Direct logs are delivered as `SR_DF_UART_VCD_TEXT`, saved beside
+> `.dsl` as `capture.dsl.txt`, and loop-mode UI/save paths compensate
+> `LogicSnapshot::get_loop_offset()`.
+
 ## 1. 当前架构
 
 UART_VCD 使用事件协议，不再从串口接收每个采样点的 32-bit GPIO 状态。
@@ -21,8 +27,8 @@ Telink MCU
 
 | 通道 | 用途 |
 |---|---|
-| D0-D23 | GPIO high/low/toggle 事件 |
-| RX0-RX7 | v3 direct text 直接显示 annotation，不生成 RX 波形 |
+| D0-D27 | GPIO high/low/toggle 事件 |
+| LOG-DEBUG/INFO/WARN/ERROR | v3 direct text 直接显示 annotation，不生成 RX 波形 |
 
 MCU 的 24 MHz `stimer_get_tick()` 与 DSView 的 24 MHz sample 一一对应。
 
@@ -43,16 +49,15 @@ GPIO 事件固定为 4 bytes：
 direct text 事件为：
 
 ```text
-label: [delta:3][0x80][channel:1][label_len:1][label][padding]
-sync:  [delta:3][0xA0][gpio_state24:3][inv_gpio_state24:3][0x55][0xAA]
-text:  [delta:3][0xC0/0xE0][channel:1][data_len:1][data][padding]
+sync:  [delta:3][0xA0][gpio_state32:4][inv_gpio_state32:4][0x55][0xAA][0x5A][0xA5]
+text:  [delta:3][0xC0/0xE0][level:1][label_len:1][data_len:1][label][data][padding]
 ```
 
 普通帧不带 per-frame magic。MCU 周期性发送 `0xA0` sync 帧，PC 收到错包后
 丢弃到下一个合法 sync 帧，再用其中的绝对 GPIO state 恢复。
 
 PC 端通过 `SR_DF_UART_VCD_TEXT` 直接推入 decoder annotation row，不再为
-RX0-RX7 合成 8N1 波形。完整定义见 `test_uart_vcd_event_protocol_v3.md`。
+LOG 通道合成 8N1 波形。完整定义见 `test_uart_vcd_event_protocol_v3.md`。
 
 ## 3. PC 端处理
 

@@ -56,10 +56,14 @@ cmake --build cmake-build-debug-system-gcc13
 - Samplerate: 24MHz (matching MCU timer resolution)
 - v3 direct text is the only supported protocol; see `test_uart_vcd_event_protocol_v3.md`
 
-**GPIO** (mode=0): sub=low(0)/high(1), param=channel(0-23), total=4B
-**Sync**: `0xA0`, 12B absolute GPIO state frame; PC drops bad bytes until the next valid sync frame
-**v3 Text**: label event `0x80`, text event `0xC0` HEX / `0xE0` ASCII;
-  PC emits `SR_DF_UART_VCD_TEXT` instead of synthesizing 8N1 waveform
+**GPIO** (mode=0): sub=low(0)/high(1), param=channel(0-27), total=4B
+**Sync**: `0xA0`, 16B absolute GPIO state frame:
+  `[delta:3][0xA0][gpio_state32:4][inv_gpio_state32:4][55 AA 5A A5]`;
+  PC waits for the first valid sync at acquisition start and sets that point to sample 0.
+**v3 Text**: `0xC0` HEX / `0xE0` ASCII direct log frames:
+  `[level][label_len][data_len][label][data][pad]`; PC concatenates
+  `label + rendered_data` and emits `SR_DF_UART_VCD_TEXT` instead of
+  synthesizing 8N1 waveform.
 
 ### PC parser (`uart_vcd.c`)
 - Zero-copy from read buffer (no memcpy when no partial data)
@@ -73,8 +77,11 @@ cmake --build cmake-build-debug-system-gcc13
 - **gpio_event.c**: protocol v3 encoder, only sends high/low (toggle converted locally)
 - **app_dma.c**: ping-pong DMA buffer (zero-copy from producer to `uart_send_dma`)
 - `stimer_get_tick()` returns raw 24MHz ticks
-- `gpio_event_send_label(ch, label, label_len)` registers RX labels
-- `gpio_event_send_text(ch, render_mode, data, data_len)` emits direct text
+- `gpio_event_send_label()` is removed/deprecated
+- `gpio_event_send_text(gpio_event_level_t level,
+  gpio_event_render_mode_t render_mode, label, label_len, data, data_len)`
+  emits direct log annotations; label and data are each optional, but at least
+  one must be present
 - `gpio_event_reset_timer()` to reset tick base
 
 ### Key files
@@ -82,7 +89,7 @@ cmake --build cmake-build-debug-system-gcc13
 |------|------|
 | `libsigrok4DSL/hardware/uart_vcd/uart_vcd.c` | TCP-only driver, v3 parser, sparse logic + direct text |
 | `libsigrok4DSL/hardware/uart_vcd/uart_vcd.h` | Driver config, context struct |
-| `DSView/res/uart-vcd0.def.dsc` | Default profile for 32 channels and 8 UART decoders; values must stay synchronized with `uart_vcd.h` |
+| `DSView/res/uart-vcd0.def.dsc` | Default profile for 28 GPIO channels and 4 LOG decoder traces; values must stay synchronized with `uart_vcd.h` |
 | `low_part/UART_V1.0/gpio_event.c` | MCU protocol v3 encoder |
 | `low_part/UART_V1.0/app_dma.c` | MCU DMA + main_loop |
 | `low_part/bridge/serial_bridge.py` | Python serial↔TCP bridge |
@@ -102,12 +109,19 @@ cmake --build cmake-build-debug-system-gcc13
   loop window reaches the max sample count
 - Native UART decode path is bypassed for UART_VCD v3; RX text arrives as direct
   annotation packets
+- Direct log trace colors are fixed by level: DEBUG blue, INFO green, WARN
+  yellow, ERROR red; level 3 / Rx3 is the error channel
+- `.dsl` save writes UART_VCD direct logs to a sidecar `xxx.dsl.txt`; opening
+  `xxx.dsl` tries to load the same sidecar and re-inject direct annotations
+- Loop-mode UART_VCD sparse save/render uses the visible time axis while the
+  live sparse backend keeps absolute ticks internally; UI log rendering and
+  sidecar export account for `LogicSnapshot::get_loop_offset()`
 
 ### Memory model
 - `uart_vcd.c` forwards absolute-time `LA_SPARSE_EVENTS`; it does not expand idle time into dense samples
 - `LogicSnapshot` stores UART_VCD as sparse per-channel edges; memory follows
   edge count, not 24MHz sample count
-- Dense 32-channel 24MHz storage would consume about 97.5MB/s; UART_VCD avoids
+- Dense 28-channel 24MHz storage would consume about 85MB/s; UART_VCD avoids
   that path for normal capture
 - DSL `SR_CONF_RLE` is an FPGA acquisition feature and does not provide a
   compressed Snapshot representation
