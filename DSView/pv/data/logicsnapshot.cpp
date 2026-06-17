@@ -326,13 +326,17 @@ bool LogicSnapshot::sparse_sample(uint64_t index, int order) const
     return it == edges.begin() ? false : (it - 1)->level;
 }
 
-bool LogicSnapshot::sparse_next_edge(uint64_t &index, uint64_t end,
-                                     int order) const
+bool LogicSnapshot::sparse_next_edge(uint64_t &index, bool last_sample,
+                                     uint64_t end, int order) const
 {
     const std::vector<SparseEdge> &edges = _sparse_edges[order];
-    const auto it = lower_bound(edges.begin(), edges.end(), index,
-        [](const SparseEdge &edge, uint64_t sample) {
-            return edge.sample < sample;
+
+    if (sparse_sample(index, order) != last_sample)
+        return true;
+
+    const auto it = upper_bound(edges.begin(), edges.end(), index,
+        [](uint64_t sample, const SparseEdge &edge) {
+            return sample < edge.sample;
         });
     if (it == edges.end() || it->sample > end)
         return false;
@@ -340,9 +344,16 @@ bool LogicSnapshot::sparse_next_edge(uint64_t &index, uint64_t end,
     return true;
 }
 
-bool LogicSnapshot::sparse_prev_edge(uint64_t &index, int order) const
+bool LogicSnapshot::sparse_prev_edge(uint64_t &index, bool last_sample,
+                                     int order) const
 {
     const std::vector<SparseEdge> &edges = _sparse_edges[order];
+
+    if (sparse_sample(index, order) != last_sample) {
+        index++;
+        return true;
+    }
+
     auto it = upper_bound(edges.begin(), edges.end(), index,
         [](uint64_t sample, const SparseEdge &edge) {
             return sample < edge.sample;
@@ -1016,9 +1027,8 @@ bool LogicSnapshot::get_nxt_edge_self(uint64_t &index, bool last_sample, uint64_
         return false;
 
     if (_sparse_mode) {
-        (void)last_sample;
         (void)min_length;
-        return sparse_next_edge(index, end, order);
+        return sparse_next_edge(index, last_sample, end, order);
     }
 
     //const unsigned int min_level = max((int)floorf(logf(min_length) / logf(Scale)) - 1, 0);
@@ -1116,9 +1126,8 @@ bool LogicSnapshot::get_pre_edge_self(uint64_t &index, bool last_sample,
         return false;
 
     if (_sparse_mode) {
-        (void)last_sample;
         (void)min_length;
-        return sparse_prev_edge(index, order);
+        return sparse_prev_edge(index, last_sample, order);
     }
 
     //const unsigned int min_level = max((int)floorf(logf(min_length) / logf(Scale)) - 1, 1);
