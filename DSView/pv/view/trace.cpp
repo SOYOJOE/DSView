@@ -49,6 +49,22 @@ const QColor Trace::PROBE_COLORS[8] = {
 };
 const int Trace::LabelHitPadding = 2;
 
+static bool uart_vcd_log_colour(int probe_index, QColor &colour)
+{
+    static const QColor LogColours[4] = {
+        QColor(0x72, 0x9F, 0xCF), /* DEBUG */
+        QColor(0x8A, 0xE2, 0x34), /* INFO */
+        QColor(0xFC, 0xE9, 0x4F), /* WARN */
+        QColor(0xEF, 0x29, 0x29), /* ERROR */
+    };
+    const int level = probe_index - 28;
+    if (level < 0 || level >= 4)
+        return false;
+
+    colour = LogColours[level];
+    return true;
+}
+
 Trace::Trace(QString name, uint16_t index, int type) :
     _view(NULL),
 	_name(name),
@@ -198,8 +214,11 @@ void Trace::paint_label(QPainter &p, int right, const QPoint pt, QColor fore)
     // Paint the ColorButton
     QColor foreBack = fore;
     foreBack.setAlpha(View::BackAlpha);
+    QColor trace_colour = _colour;
+    if (_type == SR_CHANNEL_DECODER && !_index_list.empty())
+        uart_vcd_log_colour(*_index_list.begin(), trace_colour);
     p.setPen(Qt::transparent);
-    p.setBrush(enabled() ? (_colour.isValid() ? _colour : fore) : foreBack);
+    p.setBrush(enabled() ? (trace_colour.isValid() ? trace_colour : fore) : foreBack);
     p.drawRect(color_rect);
     
     if (_type == SR_CHANNEL_DSO ||
@@ -236,6 +255,8 @@ void Trace::paint_label(QPainter &p, int right, const QPoint pt, QColor fore)
             p.drawPolygon(points, countof(points));
         } else {
             QColor color = PROBE_COLORS[*_index_list.begin() % countof(PROBE_COLORS)];
+            if (_type == SR_CHANNEL_DECODER)
+                uart_vcd_log_colour(*_index_list.begin(), color);
             p.setBrush(color);
             p.drawPolygon(points, countof(points));
         }

@@ -112,6 +112,29 @@ const QColor DecodeTrace::OutlineColours[16] = {
 	QColor(0x6B, 0x23, 0x37)
 };
 
+static bool uart_vcd_log_colour(int probe_index, QColor &fill, QColor &outline)
+{
+    static const QColor LogFill[4] = {
+        QColor(0x72, 0x9F, 0xCF), /* DEBUG */
+        QColor(0x8A, 0xE2, 0x34), /* INFO */
+        QColor(0xFC, 0xE9, 0x4F), /* WARN */
+        QColor(0xEF, 0x29, 0x29), /* ERROR */
+    };
+    static const QColor LogOutline[4] = {
+        QColor(0x39, 0x4F, 0x67),
+        QColor(0x45, 0x71, 0x1A),
+        QColor(0x7E, 0x74, 0x27),
+        QColor(0x77, 0x14, 0x14),
+    };
+    const int level = probe_index - 28;
+    if (level < 0 || level >= 4)
+        return false;
+
+    fill = LogFill[level];
+    outline = LogOutline[level];
+    return true;
+}
+
 
 DecodeTrace::DecodeTrace(pv::SigSession *session,
 	pv::data::DecoderStack *decoder_stack, int index) :
@@ -120,6 +143,12 @@ DecodeTrace::DecodeTrace(pv::SigSession *session,
     assert(decoder_stack);
 
     _colour = DecodeColours[index % countof(DecodeColours)];
+    if (!decoder_stack->stack().empty()) {
+        QColor fill, outline;
+        pv::data::decode::Decoder *dec = decoder_stack->stack().front();
+        if (dec != NULL && uart_vcd_log_colour(dec->first_probe_index(), fill, outline))
+            _colour = fill;
+    }
  
     _decode_start = 0;
     _decode_end  = INT64_MAX; 
@@ -355,21 +384,8 @@ void DecodeTrace::draw_annotation(const pv::data::decode::Annotation &a,
     QColor outline = OutlineColours[colour];
 
     if (direct_text) {
-        static const QColor LogFill[4] = {
-            QColor(0x72, 0x9F, 0xCF), /* DEBUG */
-            QColor(0x8A, 0xE2, 0x34), /* INFO */
-            QColor(0xFC, 0xE9, 0x4F), /* WARN */
-            QColor(0xEF, 0x29, 0x29), /* ERROR */
-        };
-        static const QColor LogOutline[4] = {
-            QColor(0x39, 0x4F, 0x67),
-            QColor(0x45, 0x71, 0x1A),
-            QColor(0x7E, 0x74, 0x27),
-            QColor(0x77, 0x14, 0x14),
-        };
         const int level = a.type() - 1008;
-        fill = LogFill[level];
-        outline = LogOutline[level];
+        uart_vcd_log_colour(28 + level, fill, outline);
     }
 
 	if (start > right + DrawPadding || end < left - DrawPadding){
