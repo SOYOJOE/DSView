@@ -10,14 +10,6 @@
 #include "gpio_event.h"
 
 unsigned char rec_buff[256] __attribute__((aligned(4))) = {0};
-
-static void send_render_labels(void)
-{
-    gpio_event_send_label(0, (const uint8_t *)"R90:", 4);
-    gpio_event_send_label(1, (const uint8_t *)"R21:", 4);
-    gpio_event_send_label(2, (const uint8_t *)"RX2:", 4);
-    gpio_event_send_label(3, (const uint8_t *)"R33:", 4);
-}
 volatile unsigned int rev_data_len = 0;
 
 /* ─── Platform init ─── */
@@ -56,7 +48,6 @@ void user_init(void)
     uart_receive_dma(0, (unsigned char *)rec_buff, sizeof(rec_buff));
 
     gpio_event_init();
-    send_render_labels();
 }
 
 /* ─── Main loop ─── */
@@ -69,7 +60,6 @@ void main_loop(void)
 
     if (!sync_inited || clock_time_exceed(sync_tick, 200000)) {
         gpio_event_send_sync();
-        send_render_labels();
         sync_tick = t;
         sync_inited = 1;
     }
@@ -82,10 +72,14 @@ void main_loop(void)
 
     gpio_set_high_level(LED2);
     static uint8_t data[] = {0, 'a'};
-    for (int i = 0; i < 4; i++) {
-        int mode = (i < 2) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
-        gpio_event_send_text(i, mode, data, 2);
-    }
+    gpio_event_send_text(GPIO_EVENT_LEVEL_DEBUG, GPIO_EVENT_RENDER_MODE_HEX,
+                         (const uint8_t *)"D:", 2, data, 2);
+    gpio_event_send_text(GPIO_EVENT_LEVEL_INFO, GPIO_EVENT_RENDER_MODE_HEX,
+                         0, 0, data, 2);
+    gpio_event_send_text(GPIO_EVENT_LEVEL_WARN, GPIO_EVENT_RENDER_MODE_ASCII,
+                         (const uint8_t *)"W:", 2, data, 2);
+    gpio_event_send_text(GPIO_EVENT_LEVEL_ERROR, GPIO_EVENT_RENDER_MODE_ASCII,
+                         (const uint8_t *)"E:", 2, 0, 0);
     data[0]++;
     gpio_set_low_level(LED2);
 

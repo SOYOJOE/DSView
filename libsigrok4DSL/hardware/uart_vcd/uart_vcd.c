@@ -42,16 +42,6 @@ static struct sr_dev_driver *di = &uart_vcd_driver_info;
 static void flush_event_batch(struct uart_vcd_context *ctx,
                               const struct sr_dev_inst *sdi);
 
-static void init_default_labels(struct uart_vcd_context *ctx)
-{
-    int channel;
-    for (channel = 0; channel < UART_VCD_TEXT_CHANNELS; channel++) {
-        snprintf(ctx->labels[channel], sizeof(ctx->labels[channel]),
-                 "RX%d:", channel);
-        ctx->labels_received[channel] = FALSE;
-    }
-}
-
 static void record_state(struct uart_vcd_context *ctx,
                          const struct sr_dev_inst *sdi)
 {
@@ -205,17 +195,17 @@ static int ev3_frame_size(const struct uart_vcd_context *ctx,
             return -1;
         return UART_VCD_SYNC_FRAME_SIZE;
     }
-    if (header != 0x80 && header != 0xC0 && header != 0xE0)
+    if (header != 0xC0 && header != 0xE0)
         return -1;
 
-    if (len < 6)
+    if (len < 7)
         return 0;
     if (p[4] >= UART_VCD_TEXT_CHANNELS)
         return -1;
-    if (header == 0x80 && p[5] > UART_VCD_MAX_LABEL_LEN - 1)
+    if (p[5] == 0 && p[6] == 0)
         return -1;
 
-    payload_onwire = 2 + p[5];
+    payload_onwire = 3 + p[5] + p[6];
     payload_padded = (payload_onwire + 3) & ~3;
     frame_size = 4 + payload_padded;
     if (frame_size > UART_VCD_MAX_EVENT_SIZE)
@@ -254,7 +244,8 @@ static void append_escaped_ascii(char *dst, size_t dst_size, size_t *pos,
 
 static void emit_text_annotation(struct uart_vcd_context *ctx,
                                  const struct sr_dev_inst *sdi,
-                                 int channel, int render_hex,
+                                 int level, int render_hex,
+                                 const uint8_t *label, int label_len,
                                  const uint8_t *data, int data_len)
 {
     struct sr_datafeed_packet pkt;
@@ -263,8 +254,12 @@ static void emit_text_annotation(struct uart_vcd_context *ctx,
     size_t pos = 0;
     int i;
 
-    if (channel < 0 || channel >= UART_VCD_TEXT_CHANNELS)
+    if (level < 0 || level >= UART_VCD_TEXT_CHANNELS ||
+        (label_len <= 0 && data_len <= 0))
         return;
+
+    for (i = 0; i < label_len && pos + 1 < sizeof(out); i++)
+        out[pos++] = (char)label[i];
 
     if (render_hex) {
         static const char hexc[] = "0123456789ABCDEF";
@@ -280,35 +275,10 @@ static void emit_text_annotation(struct uart_vcd_context *ctx,
 
     text.start_sample = ctx->collected_samples;
     text.end_sample = ctx->collected_samples + 1;
-    text.channel = (uint8_t)channel;
+    text.channel = (uint8_t)level;
     text.is_label = 0;
     memset(text.reserved, 0, sizeof(text.reserved));
     text.text = out;
-
-    pkt.type = SR_DF_UART_VCD_TEXT;
-    pkt.status = SR_PKT_OK;
-    pkt.payload = &text;
-    pkt.bExportOriginalData = 0;
-    ds_data_forward(sdi, &pkt);
-}
-
-static void emit_label_update(struct uart_vcd_context *ctx,
-                              const struct sr_dev_inst *sdi,
-                              int channel)
-{
-    struct sr_datafeed_packet pkt;
-    struct sr_datafeed_uart_vcd_text text;
-
-    if (channel < 0 || channel >= UART_VCD_TEXT_CHANNELS ||
-        ctx->labels[channel][0] == '\0')
-        return;
-
-    text.start_sample = ctx->collected_samples;
-    text.end_sample = ctx->collected_samples + 1;
-    text.channel = (uint8_t)channel;
-    text.is_label = 1;
-    memset(text.reserved, 0, sizeof(text.reserved));
-    text.text = ctx->labels[channel];
 
     pkt.type = SR_DF_UART_VCD_TEXT;
     pkt.status = SR_PKT_OK;
@@ -379,25 +349,17 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
         ctx->output_state =
             (ctx->output_state & UART_VCD_NON_GPIO_MASK) | ctx->gpio_state;
         record_state(ctx, sdi);
-    } else if (header == 0x80) {
-        const int channel = p[4];
-        const int label_len = p[5];
-        int copy_len = label_len;
-        if (copy_len > UART_VCD_MAX_LABEL_LEN - 1)
-            copy_len = UART_VCD_MAX_LABEL_LEN - 1;
-        memcpy(ctx->labels[channel], p + 6, (size_t)copy_len);
-        ctx->labels[channel][copy_len] = '\0';
-        ctx->labels_received[channel] = TRUE;
-        emit_label_update(ctx, sdi, channel);
     } else {
-        const int channel = p[4];
-        const int data_len = p[5];
+        const int level = p[4];
+        const int label_len = p[5];
+        const int data_len = p[6];
         uint64_t target = ctx->collected_samples + delta_samples;
         if (!ctx->is_loop && target > ctx->total_samples)
             target = ctx->total_samples;
         advance_time(ctx, target);
-        emit_text_annotation(ctx, sdi, channel, header == 0xC0,
-                             p + 6, data_len);
+        emit_text_annotation(ctx, sdi, level, header == 0xC0,
+                             p + 7, label_len,
+                             p + 7 + label_len, data_len);
     }
 
     ctx->parsed_events++;
@@ -498,7 +460,6 @@ static GSList *hw_scan(GSList *options)
     ctx->samplerate=UART_VCD_EVENT_SAMPLERATE_DEFAULT;
     ctx->total_samples=UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES;
     ctx->num_probes=UART_VCD_NUM_PROBES;
-    init_default_labels(ctx);
     sdi->path=g_strdup("tcp");
     drvc->instances=g_slist_append(drvc->instances,sdi);
     devices=g_slist_append(devices,sdi);
@@ -629,8 +590,6 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     ctx->gpio_state=0; ctx->output_state=UART_VCD_NON_GPIO_MASK;
     ctx->sync_seen=FALSE;
     ctx->input_len=0; ctx->input_offset=0; ctx->event_count=0;
-    init_default_labels(ctx);
-
     if (tcp_reconnect(ctx)!=SR_OK) { ctx->collecting=FALSE; return SR_ERR; }
 
     free(ctx->input_buf);

@@ -56,7 +56,7 @@
         {
             "channel": [{"rxtx": 28}],
             "id": "0:uart",
-            "label": "0:UART-RX0",
+            "label": "LOG-DEBUG",
             "options": {
                 "anno_startstop": "no",
                 "baudrate": 6000000,
@@ -83,7 +83,7 @@
         {
             "channel": [{"rxtx": 29}],
             "id": "0:uart",
-            "label": "1:UART-RX1",
+            "label": "LOG-INFO",
             "options": {
                 "anno_startstop": "no",
                 "baudrate": 6000000,
@@ -110,7 +110,7 @@
         {
             "channel": [{"rxtx": 30}],
             "id": "0:uart",
-            "label": "2:UART-RX2",
+            "label": "LOG-WARN",
             "options": {
                 "anno_startstop": "no",
                 "baudrate": 6000000,
@@ -137,7 +137,7 @@
         {
             "channel": [{"rxtx": 31}],
             "id": "0:uart",
-            "label": "3:UART-RX3",
+            "label": "LOG-ERROR",
             "options": {
                 "anno_startstop": "no",
                 "baudrate": 6000000,

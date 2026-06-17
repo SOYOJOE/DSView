@@ -970,55 +970,6 @@ namespace pv
         }        
     }
 
-    bool SigSession::update_uart_vcd_decoder_label(int channel,
-                                                   const QString &label)
-    {
-        const int target_probe = UartVcdTextProbeOffset + channel;
-        bool changed = false;
-
-        for (auto trace : _decode_traces) {
-            if (trace == NULL || trace->decoder() == NULL)
-                continue;
-
-            data::DecoderStack *stack = trace->decoder();
-            if (stack->stack().empty())
-                continue;
-
-            data::decode::Decoder *dec = stack->stack().front();
-            if (dec == NULL || dec->first_probe_index() != target_probe)
-                continue;
-
-            if (trace->get_name() != label) {
-                set_trace_name(trace, label);
-                changed = true;
-            }
-        }
-
-        return changed;
-    }
-
-    void SigSession::update_uart_vcd_label(int channel, const QString &label)
-    {
-        if (channel < 0 || channel >= UartVcdTextChannels ||
-            label.trimmed().isEmpty())
-            return;
-
-        const int probe_index = UartVcdTextProbeOffset + channel;
-        bool changed = false;
-        view::Trace *trace = get_channel_by_index(probe_index);
-        if (trace != NULL && trace->get_name() != label) {
-            set_trace_name(trace, label);
-            changed = true;
-        }
-
-        if (update_uart_vcd_decoder_label(channel, label))
-            changed = true;
-
-        if (changed) {
-            signals_changed();
-        }
-    }
-
     void SigSession::reload()
     {
         if (_device_agent.have_instance() == false)
@@ -1324,13 +1275,6 @@ namespace pv
             o.end_sample : o.start_sample + 1;
         const QString text = QString::fromUtf8(o.text);
 
-        if (o.is_label) {
-            update_uart_vcd_label((int)o.channel, text);
-            dsv_info("uart_vcd label update: channel=%u label=%s",
-                     (unsigned int)o.channel, o.text);
-            return;
-        }
-
         for (auto trace : _decode_traces) {
             if (trace == NULL || trace->decoder() == NULL)
                 continue;
@@ -1343,7 +1287,8 @@ namespace pv
             if (dec == NULL || dec->first_probe_index() != target_probe)
                 continue;
 
-            stack->push_direct_annotation(start, end, 0, 1008, {text});
+            stack->push_direct_annotation(start, end, 0,
+                                          1008 + (int)o.channel, {text});
             if (stack->get_result_count() == 1 ||
                 (stack->get_result_count() & 0x3ff) == 0) {
                 dsv_info("uart_vcd text annotation: channel=%u count=%llu sample=%llu text=%s",

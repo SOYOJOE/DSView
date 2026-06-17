@@ -348,11 +348,29 @@ void DecodeTrace::draw_annotation(const pv::data::decode::Annotation &a,
         pixels_offset, (double)left);
     double end = min(a.end_sample() / samples_per_pixel -
         pixels_offset, (double)right);
-    const bool direct_text = a.type() == 1008;
+    const bool direct_text = a.type() >= 1008 && a.type() <= 1011;
 
     const size_t colour = ((base_colour + a.type()) % MaxAnnType) % countof(Colours);
-	const QColor &fill = Colours[colour];
-	const QColor &outline = OutlineColours[colour];
+    QColor fill = Colours[colour];
+    QColor outline = OutlineColours[colour];
+
+    if (direct_text) {
+        static const QColor LogFill[4] = {
+            QColor(0x72, 0x9F, 0xCF), /* DEBUG */
+            QColor(0x8A, 0xE2, 0x34), /* INFO */
+            QColor(0xFC, 0xE9, 0x4F), /* WARN */
+            QColor(0xEF, 0x29, 0x29), /* ERROR */
+        };
+        static const QColor LogOutline[4] = {
+            QColor(0x39, 0x4F, 0x67),
+            QColor(0x45, 0x71, 0x1A),
+            QColor(0x7E, 0x74, 0x27),
+            QColor(0x77, 0x14, 0x14),
+        };
+        const int level = a.type() - 1008;
+        fill = LogFill[level];
+        outline = LogOutline[level];
+    }
 
 	if (start > right + DrawPadding || end < left - DrawPadding){
 		return;

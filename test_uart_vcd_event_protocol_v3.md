@@ -2,14 +2,13 @@
 
 ## 1. Goal
 
-v3 extended keeps the low-cost GPIO event path from v2, and replaces RX0-RX3 virtual
-8N1 waveform synthesis with direct text annotations. The first implementation
+v3 extended keeps the low-cost GPIO event path from v2, and replaces RX0-RX3
+virtual 8N1 waveform synthesis with direct log annotations. The implementation
 is intentionally small:
 
 - mode 0: single GPIO high/low event
-- mode 1: RX label registration
 - mode 2: sync/resync absolute GPIO state
-- mode 3: direct RX text annotation
+- mode 3: direct log annotation
 
 Multi-GPIO mask batching remains a future extension and must use a different
 header or a versioned sync payload if it is added later.
@@ -33,10 +32,9 @@ Only these header values are valid in v3:
 |---:|---|---|
 | `0x00-0x1B` | mode 0 | GPIO low, channel 0-27 |
 | `0x20-0x3B` | mode 0 | GPIO high, channel 0-27 |
-| `0x80` | mode 1 | label registration |
 | `0xA0` | mode 2 | sync/resync, absolute GPIO state |
-| `0xC0` | mode 3 | direct text, HEX render |
-| `0xE0` | mode 3 | direct text, ASCII render |
+| `0xC0` | mode 3 | direct log, HEX render for data |
+| `0xE0` | mode 3 | direct log, ASCII render for data |
 
 All other headers are invalid and must be rejected by the PC parser. In
 particular, v2 string headers such as `0x86` are not valid v3 frames.
@@ -58,49 +56,37 @@ Rules:
 - Delta is emitted before the state change: idle time first, then new level.
 - This mode is safe for ISR printing because it preserves every edge.
 
-## 4. Mode 1: Label Registration
+## 4. Mode 1: Deprecated
+
+Header `0x80` label registration is deprecated and invalid in v3 extended.
+Trace names are configured by the DSView profile as log levels.
+
+## 5. Mode 3: Direct Log Annotation
 
 ```text
-[delta:3][0x80][channel:1][label_len:1][label:label_len][pad_to_4B]
+[delta:3][header:1][level:1][label_len:1][data_len:1]
+[label:label_len][data:data_len][pad_to_4B]
+header = 0xC0 for HEX render of data
+header = 0xE0 for ASCII render of data
 ```
 
 Rules:
 
-- `channel` is 0..3 for RX0-RX3.
-- `label_len` is 0..127.
-- Payload length is `2 + label_len`, padded to 4 bytes with zero bytes.
-- Frame size is `4 + align4(2 + label_len)`.
-- Padding bytes must be zero.
-- Label bytes are printable ASCII. Non-printable bytes should be escaped by
-  the PC if accepted.
-- Label registration is metadata. The recommended MCU delta is 0. The PC may
-  accept non-zero delta for resync tolerance, but label events should not be
-  used to represent user signal timing.
-- The PC applies the label to the corresponding render trace name. It is saved
-  only by the existing UI/session save flow, such as application close or
-  device switch; label frames do not force an immediate profile write.
-
-The label is not prepended to annotation data.
-
-## 5. Mode 3: Direct Text Annotation
-
-```text
-[delta:3][header:1][channel:1][data_len:1][data:data_len][pad_to_4B]
-header = 0xC0 for HEX render
-header = 0xE0 for ASCII render
-```
-
-Rules:
-
-- `channel` is 0..3 for RX0-RX3.
+- `level` is 0..3 for DEBUG, INFO, WARN, ERROR.
+- `label_len` is 0..255. Label bytes are always treated as string bytes.
 - `data_len` is 0..255.
-- Payload length is `2 + data_len`, padded to 4 bytes with zero bytes.
-- Frame size is `4 + align4(2 + data_len)`.
+- `label_len` and `data_len` may not both be zero.
+- Payload length is `3 + label_len + data_len`, padded to 4 bytes with zero
+  bytes.
+- Frame size is `4 + align4(3 + label_len + data_len)`, and must not exceed
+  264 bytes.
 - Padding bytes must be zero.
 - Delta advances sample time, then the annotation is emitted at that sample.
-- Annotation text is only the rendered data. Labels update the UI trace name
-  and are not prepended to annotation text.
-- If no label has been registered, use default trace labels `RX0:`..`RX3:`.
+- PC constructs annotation text as `label + rendered_data` and sends that
+  directly to the annotation UI.
+- The default render traces are named `LOG-DEBUG`, `LOG-INFO`, `LOG-WARN`,
+  and `LOG-ERROR`; level 3 is the error channel.
+- DSView colors direct annotations by log level.
 
 HEX render:
 
@@ -151,15 +137,15 @@ Suggested text payload:
 struct sr_datafeed_uart_vcd_text {
     uint64_t start_sample;
     uint64_t end_sample;
-    uint8_t channel;      /* 0..3, RX0-RX3 */
-    uint8_t is_label;     /* 1 for UI label update, 0 for annotation data */
+    uint8_t channel;      /* 0..3 log level */
+    uint8_t is_label;     /* unused in v3 extended, always 0 */
     uint8_t reserved[6];
     const char *text;     /* UTF-8/ASCII, valid during ds_data_forward() */
 };
 ```
 
 `SigSession::data_feed_in()` routes `SR_DF_UART_VCD_TEXT` to the decoder stack
-whose first probe index is `28 + channel`. If no matching stack exists, it
+whose first probe index is `28 + level`. If no matching stack exists, it
 prints a diagnostic and drops the annotation. It must not inject text into an
 unrelated decoder stack.
 
@@ -179,11 +165,24 @@ void gpio_event_irq_low(unsigned int channel);
 void gpio_event_irq_toggle(unsigned int channel);
 ```
 
-Add v3 text APIs:
+Add v3 extended text/log API:
 
 ```c
-void gpio_event_send_label(int channel, const uint8_t *label, int label_len);
-void gpio_event_send_text(int channel, int render_mode,
+typedef enum {
+    GPIO_EVENT_LEVEL_DEBUG = 0,
+    GPIO_EVENT_LEVEL_INFO = 1,
+    GPIO_EVENT_LEVEL_WARN = 2,
+    GPIO_EVENT_LEVEL_ERROR = 3,
+} gpio_event_level_t;
+
+typedef enum {
+    GPIO_EVENT_RENDER_MODE_HEX = 0,
+    GPIO_EVENT_RENDER_MODE_ASCII = 1,
+} gpio_event_render_mode_t;
+
+void gpio_event_send_text(gpio_event_level_t level,
+                          gpio_event_render_mode_t render_mode,
+                          const uint8_t *label, int label_len,
                           const uint8_t *data, int data_len);
 ```
 
@@ -193,8 +192,8 @@ The PC parser must reject:
 
 - unknown headers
 - GPIO channel > 27
-- RX channel > 3
-- label length > 127
+- log level > 3
+- label and data both empty
 - text frame with payload larger than protocol maximum
 - non-zero padding
 - malformed sync frame
@@ -207,8 +206,8 @@ sync frame, drops only bytes before that sync frame, and continues acquisition.
 
 1. Add `SR_DF_UART_VCD_TEXT` and route it through `SigSession`.
 2. Make native annotation injection callable from `SigSession`.
-3. Add v3-only label/text parser in `uart_vcd.c`.
-4. Add MCU `gpio_event_send_label()` and `gpio_event_send_text()`.
-5. Update `app_dma.c` to send labels once and use text events.
+3. Add v3 extended direct log parser in `uart_vcd.c`.
+4. Add MCU `gpio_event_send_text()`.
+5. Update `app_dma.c` to use log events.
 6. Test that RX annotations display after capture without native UART decode.
 7. Only then revisit multi-GPIO mask or multi-string grouping.

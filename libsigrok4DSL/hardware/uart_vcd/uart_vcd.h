@@ -26,7 +26,6 @@
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
 #define UART_VCD_MAX_HW_DEPTH             SR_Mn(25000)
 #define UART_VCD_EVENT_BATCH_SIZE    4096
-#define UART_VCD_MAX_LABEL_LEN       128
 
 struct uart_vcd_context {
     int        tcp_fd;
@@ -55,8 +54,6 @@ struct uart_vcd_context {
     uint64_t   recovered_packets;
     uint64_t   dropped_input_bytes;
     gboolean   sync_seen;
-    char       labels[UART_VCD_TEXT_CHANNELS][UART_VCD_MAX_LABEL_LEN];
-    gboolean   labels_received[UART_VCD_TEXT_CHANNELS];
 };
 
 static const uint64_t uart_vcd_samplerates[] = { 24000000 };

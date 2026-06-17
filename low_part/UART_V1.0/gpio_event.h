@@ -28,10 +28,18 @@ extern "C" {
 #endif
 
 /* ─── Configuration ─── */
-enum {
+typedef enum {
+    GPIO_EVENT_LEVEL_DEBUG = 0,
+    GPIO_EVENT_LEVEL_INFO = 1,
+    GPIO_EVENT_LEVEL_WARN = 2,
+    GPIO_EVENT_LEVEL_ERROR = 3,
+} gpio_event_level_t;
+
+typedef enum {
     GPIO_EVENT_RENDER_MODE_HEX = 0,
     GPIO_EVENT_RENDER_MODE_ASCII = 1,
-};
+} gpio_event_render_mode_t;
+
 #define GPIO_EVENT_SYS_CLOCK_HZ    24000000
 #define GPIO_EVENT_GPIO_MAX        27
 #define GPIO_EVENT_RENDER_MAX      3
@@ -66,9 +74,10 @@ void gpio_event_irq_high(unsigned int channel);
 void gpio_event_irq_low(unsigned int channel);
 void gpio_event_irq_toggle(unsigned int channel);
 
-void gpio_event_send_label(int channel, const uint8_t *label, int label_len);
 void gpio_event_send_sync(void);
-void gpio_event_send_text(int channel, int render_mode,
+void gpio_event_send_text(gpio_event_level_t level,
+                          gpio_event_render_mode_t render_mode,
+                          const uint8_t *label, int label_len,
                           const uint8_t *data, int data_len);
 void gpio_event_tx(void);
 

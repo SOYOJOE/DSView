@@ -476,9 +476,6 @@ private:
     void add_decode_task(view::DecodeTrace *trace);
     void remove_decode_task(view::DecodeTrace *trace);
     void clear_all_decode_task(int &runningDex);
-    bool update_uart_vcd_decoder_label(int channel, const QString &label);
-    void update_uart_vcd_label(int channel, const QString &label);
-
     inline void clear_all_decode_task2(){
         int run_dex = 0;
         clear_all_decode_task(run_dex);
