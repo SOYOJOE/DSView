@@ -10,6 +10,14 @@
 #include "gpio_event.h"
 
 unsigned char rec_buff[256] __attribute__((aligned(4))) = {0};
+
+static void send_render_labels(void)
+{
+    gpio_event_send_label(0, (const uint8_t *)"R90:", 4);
+    gpio_event_send_label(1, (const uint8_t *)"R21:", 4);
+    gpio_event_send_label(2, (const uint8_t *)"RX2:", 4);
+    gpio_event_send_label(3, (const uint8_t *)"R33:", 4);
+}
 volatile unsigned int rev_data_len = 0;
 
 /* ─── Platform init ─── */
@@ -48,14 +56,7 @@ void user_init(void)
     uart_receive_dma(0, (unsigned char *)rec_buff, sizeof(rec_buff));
 
     gpio_event_init();
-    gpio_event_send_label(0, (const uint8_t *)"R90:", 4);
-    gpio_event_send_label(1, (const uint8_t *)"R21:", 4);
-    gpio_event_send_label(2, (const uint8_t *)"RX2:", 4);
-    gpio_event_send_label(3, (const uint8_t *)"R33:", 4);
-    gpio_event_send_label(4, (const uint8_t *)"RX4:", 4);
-    gpio_event_send_label(5, (const uint8_t *)"RX5:", 4);
-    gpio_event_send_label(6, (const uint8_t *)"RX6:", 4);
-    gpio_event_send_label(7, (const uint8_t *)"Ra7:", 4);
+    send_render_labels();
 }
 
 /* ─── Main loop ─── */
@@ -66,22 +67,23 @@ void main_loop(void)
     static unsigned long sync_tick = 0;
     static int sync_inited = 0;
 
-    if (!sync_inited || clock_time_exceed(sync_tick, 10000)) {
+    if (!sync_inited || clock_time_exceed(sync_tick, 200000)) {
         gpio_event_send_sync();
+        send_render_labels();
         sync_tick = t;
         sync_inited = 1;
     }
 
     gpio_set_high_level(LED1);
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < 28; i++) {
         gpio_event_toggle(i);
     }
     gpio_set_low_level(LED1);
 
     gpio_set_high_level(LED2);
     static uint8_t data[] = {0, 'a'};
-    for (int i = 0; i < 8; i++) {
-        int mode = (i < 4) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
+    for (int i = 0; i < 4; i++) {
+        int mode = (i < 2) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
         gpio_event_send_text(i, mode, data, 2);
     }
     data[0]++;

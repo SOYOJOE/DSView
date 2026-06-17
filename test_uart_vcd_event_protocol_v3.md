@@ -1,8 +1,8 @@
-# UART_VCD Event Protocol v3
+# UART_VCD Event Protocol v3 Extended
 
 ## 1. Goal
 
-v3 keeps the low-cost GPIO event path from v2, and replaces RX0-RX7 virtual
+v3 extended keeps the low-cost GPIO event path from v2, and replaces RX0-RX3 virtual
 8N1 waveform synthesis with direct text annotations. The first implementation
 is intentionally small:
 
@@ -31,8 +31,8 @@ Only these header values are valid in v3:
 
 | Header | Mode | Meaning |
 |---:|---|---|
-| `0x00-0x17` | mode 0 | GPIO low, channel 0-23 |
-| `0x20-0x37` | mode 0 | GPIO high, channel 0-23 |
+| `0x00-0x1B` | mode 0 | GPIO low, channel 0-27 |
+| `0x20-0x3B` | mode 0 | GPIO high, channel 0-27 |
 | `0x80` | mode 1 | label registration |
 | `0xA0` | mode 2 | sync/resync, absolute GPIO state |
 | `0xC0` | mode 3 | direct text, HEX render |
@@ -47,7 +47,7 @@ particular, v2 string headers such as `0x86` are not valid v3 frames.
 [delta:3][header:1]
 header = (sub << 5) | channel
 sub = 0 low, 1 high
-channel = 0..23
+channel = 0..27
 ```
 
 Rules:
@@ -66,7 +66,7 @@ Rules:
 
 Rules:
 
-- `channel` is 0..7 for RX0-RX7.
+- `channel` is 0..3 for RX0-RX3.
 - `label_len` is 0..127.
 - Payload length is `2 + label_len`, padded to 4 bytes with zero bytes.
 - Frame size is `4 + align4(2 + label_len)`.
@@ -76,13 +76,11 @@ Rules:
 - Label registration is metadata. The recommended MCU delta is 0. The PC may
   accept non-zero delta for resync tolerance, but label events should not be
   used to represent user signal timing.
-- The PC stores the label in the active capture context only. Do not persist
-  labels to disk in the first implementation; the MCU should send labels after
-  each reset/start.
+- The PC applies the label to the corresponding render trace name. It is saved
+  only by the existing UI/session save flow, such as application close or
+  device switch; label frames do not force an immediate profile write.
 
-The final text prefix is exactly the registered label. If a separator is
-desired, include it in the label, for example `RX0:`. The PC must not add an
-extra colon automatically.
+The label is not prepended to annotation data.
 
 ## 5. Mode 3: Direct Text Annotation
 
@@ -94,14 +92,15 @@ header = 0xE0 for ASCII render
 
 Rules:
 
-- `channel` is 0..7 for RX0-RX7.
+- `channel` is 0..3 for RX0-RX3.
 - `data_len` is 0..255.
 - Payload length is `2 + data_len`, padded to 4 bytes with zero bytes.
 - Frame size is `4 + align4(2 + data_len)`.
 - Padding bytes must be zero.
 - Delta advances sample time, then the annotation is emitted at that sample.
-- Annotation text is `label + rendered_data`.
-- If no label has been registered, use default labels `RX0:`..`RX7:`.
+- Annotation text is only the rendered data. Labels update the UI trace name
+  and are not prepended to annotation text.
+- If no label has been registered, use default trace labels `RX0:`..`RX3:`.
 
 HEX render:
 
@@ -120,19 +119,22 @@ protocol decoder. This is the primary v3 CPU optimization.
 
 ## 6. Mode 2: Sync / Resync
 
-Header `0xA0` is a fixed 12-byte sync frame:
+Header `0xA0` is a fixed 16-byte sync frame:
 
 ```text
-[delta:3][0xA0][gpio_state24:3][inv_gpio_state24:3][0x55][0xAA]
+[delta:3][0xA0][gpio_state32:4][inv_gpio_state32:4][0x55][0xAA][0x5A][0xA5]
 ```
 
 Rules:
 
-- `gpio_state24` is the absolute D0-D23 level after advancing delta.
-- `inv_gpio_state24` must be the bitwise inverse over 24 bits.
-- Tail bytes must be `0x55 0xAA`.
-- The MCU should emit sync periodically, for example once per 1 ms reporting
-  cycle. Normal GPIO and text frames do not carry sync overhead.
+- `gpio_state32` carries the absolute D0-D27 level in bits 0..27; bits 28..31
+  must be zero.
+- `inv_gpio_state32` must be the bitwise inverse of `gpio_state32`.
+- Tail bytes must be `0x55 0xAA 0x5A 0xA5`.
+- The MCU must emit sync periodically every 200 ms. Normal GPIO and text
+  frames do not carry sync overhead.
+- On acquisition start, the PC drops all frames until the first valid sync
+  frame. That first sync establishes sample 0 and its delta is ignored.
 - On invalid framing, the PC drops bytes until the next valid sync frame, then
   resumes from the sync absolute state.
 
@@ -140,7 +142,7 @@ Rules:
 
 The driver should emit two independent datafeed types:
 
-- `SR_DF_LOGIC` with `LA_SPARSE_EVENTS` for D0-D23 GPIO state.
+- `SR_DF_LOGIC` with `LA_SPARSE_EVENTS` for D0-D27 GPIO state.
 - `SR_DF_UART_VCD_TEXT` for direct RX text annotations.
 
 Suggested text payload:
@@ -149,14 +151,15 @@ Suggested text payload:
 struct sr_datafeed_uart_vcd_text {
     uint64_t start_sample;
     uint64_t end_sample;
-    uint8_t channel;      /* 0..7, RX0-RX7 */
-    uint8_t reserved[7];
+    uint8_t channel;      /* 0..3, RX0-RX3 */
+    uint8_t is_label;     /* 1 for UI label update, 0 for annotation data */
+    uint8_t reserved[6];
     const char *text;     /* UTF-8/ASCII, valid during ds_data_forward() */
 };
 ```
 
 `SigSession::data_feed_in()` routes `SR_DF_UART_VCD_TEXT` to the decoder stack
-whose first probe index is `24 + channel`. If no matching stack exists, it
+whose first probe index is `28 + channel`. If no matching stack exists, it
 prints a diagnostic and drops the annotation. It must not inject text into an
 unrelated decoder stack.
 
@@ -189,8 +192,8 @@ void gpio_event_send_text(int channel, int render_mode,
 The PC parser must reject:
 
 - unknown headers
-- GPIO channel > 23
-- RX channel > 7
+- GPIO channel > 27
+- RX channel > 3
 - label length > 127
 - text frame with payload larger than protocol maximum
 - non-zero padding

@@ -49,6 +49,11 @@ static int      g_initialized = 0;
 #define HEADER_SYNC        0xA0
 #define HEADER_TEXT_HEX    0xC0
 #define HEADER_TEXT_ASCII  0xE0
+#define GPIO_STATE_MASK    0x0fffffffu
+#define SYNC_MAGIC0        0x55
+#define SYNC_MAGIC1        0xAA
+#define SYNC_MAGIC2        0x5A
+#define SYNC_MAGIC3        0xA5
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * ===  SECTION 1 — TX RING BUFFER (bottom of call chain, defined first) ====
@@ -256,7 +261,7 @@ void gpio_event_send_label(int channel, const uint8_t *label, int label_len)
     uint8_t *p;
 
     if (!g_initialized) return;
-    if (channel < 0 || channel > 7) return;
+    if (channel < 0 || channel > GPIO_EVENT_RENDER_MAX) return;
     if (label_len < 0 || label_len > 127) return;
     if (label_len > 0 && label == 0) return;
 
@@ -293,22 +298,26 @@ void gpio_event_send_sync(void)
     delta = now - g_last_tick;
     g_last_tick = now;
 
-    state = g_gpio_state & 0x00ffffffu;
-    inv_state = (~state) & 0x00ffffffu;
+    state = g_gpio_state & GPIO_STATE_MASK;
+    inv_state = ~state;
     dword = (delta & 0x00ffffffu) | ((uint32_t)HEADER_SYNC << 24);
 
-    p = uart_tx_reserve(12);
+    p = uart_tx_reserve(16);
     if (p) {
         p = write_frame_header(p, dword);
         *p++ = (uint8_t)state;
         *p++ = (uint8_t)(state >> 8);
         *p++ = (uint8_t)(state >> 16);
+        *p++ = (uint8_t)(state >> 24);
         *p++ = (uint8_t)inv_state;
         *p++ = (uint8_t)(inv_state >> 8);
         *p++ = (uint8_t)(inv_state >> 16);
-        *p++ = 0x55;
-        *p++ = 0xAA;
-        uart_tx_commit(12);
+        *p++ = (uint8_t)(inv_state >> 24);
+        *p++ = SYNC_MAGIC0;
+        *p++ = SYNC_MAGIC1;
+        *p++ = SYNC_MAGIC2;
+        *p++ = SYNC_MAGIC3;
+        uart_tx_commit(16);
     }
 }
 
@@ -321,7 +330,7 @@ void gpio_event_send_text(int channel, int render_mode,
     uint8_t *p;
 
     if (!g_initialized) return;
-    if (channel < 0 || channel > 7) return;
+    if (channel < 0 || channel > GPIO_EVENT_RENDER_MAX) return;
     if (render_mode != GPIO_EVENT_RENDER_MODE_HEX &&
         render_mode != GPIO_EVENT_RENDER_MODE_ASCII) return;
     if (data_len < 0 || data_len > 255) return;

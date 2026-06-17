@@ -60,7 +60,8 @@
 
 namespace pv
 {
-    static const int UartVcdTextProbeOffset = 24;
+    static const int UartVcdTextProbeOffset = 28;
+    static const int UartVcdTextChannels = 4;
 
     SessionData::SessionData()
     {
@@ -998,7 +999,8 @@ namespace pv
 
     void SigSession::update_uart_vcd_label(int channel, const QString &label)
     {
-        if (channel < 0 || channel >= 8 || label.trimmed().isEmpty())
+        if (channel < 0 || channel >= UartVcdTextChannels ||
+            label.trimmed().isEmpty())
             return;
 
         const int probe_index = UartVcdTextProbeOffset + channel;
@@ -1310,7 +1312,7 @@ namespace pv
 
     void SigSession::feed_in_uart_vcd_text(const sr_datafeed_uart_vcd_text &o)
     {
-        if (o.channel >= 8 || o.text == NULL) {
+        if (o.channel >= UartVcdTextChannels || o.text == NULL) {
             dsv_info("uart_vcd text annotation dropped: channel=%u text=%p",
                      (unsigned int)o.channel, (const void*)o.text);
             return;

@@ -16,7 +16,11 @@
 
 #define UART_VCD_DEFAULT_TCP_PORT    12345
 #define UART_VCD_DEFAULT_TCP_HOST    "192.168.100.135"
-#define UART_VCD_NUM_PROBES          24
+#define UART_VCD_NUM_PROBES          28
+#define UART_VCD_GPIO_PROBES         28
+#define UART_VCD_TEXT_CHANNELS       4
+#define UART_VCD_GPIO_MASK           0x0fffffffu
+#define UART_VCD_NON_GPIO_MASK       0xf0000000u
 #define UART_VCD_BUFSIZE             (1024 * 1024)
 #define UART_VCD_EVENT_SAMPLERATE_DEFAULT  24000000
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
@@ -50,8 +54,9 @@ struct uart_vcd_context {
     uint64_t   bad_packets;
     uint64_t   recovered_packets;
     uint64_t   dropped_input_bytes;
-    char       labels[8][UART_VCD_MAX_LABEL_LEN];
-    gboolean   labels_received[8];
+    gboolean   sync_seen;
+    char       labels[UART_VCD_TEXT_CHANNELS][UART_VCD_MAX_LABEL_LEN];
+    gboolean   labels_received[UART_VCD_TEXT_CHANNELS];
 };
 
 static const uint64_t uart_vcd_samplerates[] = { 24000000 };
@@ -60,6 +65,7 @@ static const char *uart_vcd_probe_names[] = {
     "D0",  "D1",  "D2",  "D3",  "D4",  "D5",  "D6",  "D7",
     "D8",  "D9",  "D10", "D11", "D12", "D13", "D14", "D15",
     "D16", "D17", "D18", "D19", "D20", "D21", "D22", "D23",
+    "D24", "D25", "D26", "D27",
     NULL,
 };
 

@@ -27,8 +27,12 @@
 #define UART_VCD_EVENT_LIMIT            65536
 #define UART_VCD_DELTA_CLAMP            0x00ffffffu
 #define UART_VCD_MAX_EVENT_SIZE         264
-#define UART_VCD_SYNC_FRAME_SIZE        12
+#define UART_VCD_SYNC_FRAME_SIZE        16
 #define UART_VCD_HEADER_SYNC            0xA0
+#define UART_VCD_SYNC_MAGIC0            0x55
+#define UART_VCD_SYNC_MAGIC1            0xAA
+#define UART_VCD_SYNC_MAGIC2            0x5A
+#define UART_VCD_SYNC_MAGIC3            0xA5
 #define UART_VCD_ERROR_DUMP_SIZE        32
 #define UART_VCD_TEXT_BUF_SIZE          1200
 
@@ -41,7 +45,7 @@ static void flush_event_batch(struct uart_vcd_context *ctx,
 static void init_default_labels(struct uart_vcd_context *ctx)
 {
     int channel;
-    for (channel = 0; channel < 8; channel++) {
+    for (channel = 0; channel < UART_VCD_TEXT_CHANNELS; channel++) {
         snprintf(ctx->labels[channel], sizeof(ctx->labels[channel]),
                  "RX%d:", channel);
         ctx->labels_received[channel] = FALSE;
@@ -125,7 +129,8 @@ static void send_event_end(struct uart_vcd_context *ctx, const struct sr_dev_ins
                 (unsigned long long)ctx->dropped_input_bytes);
     }
 
-    flush_event_batch(ctx, sdi);
+    if (ctx->sync_seen)
+        flush_event_batch(ctx, sdi);
     struct sr_datafeed_packet pkt;
     pkt.type=SR_DF_END; pkt.status=SR_PKT_OK;
     ds_data_forward(sdi, &pkt);
@@ -175,7 +180,7 @@ static int ev3_frame_size(const struct uart_vcd_context *ctx,
     if (!(header & 0x80)) {
         const uint8_t sub = (header >> 5) & 3;
         const uint8_t channel = header & 0x1F;
-        if (sub > 1 || channel > 23)
+        if (sub > 1 || channel >= UART_VCD_GPIO_PROBES)
             return -1;
         return 4;
     }
@@ -185,12 +190,18 @@ static int ev3_frame_size(const struct uart_vcd_context *ctx,
         if (len < UART_VCD_SYNC_FRAME_SIZE)
             return 0;
         state = (uint32_t)p[4] | ((uint32_t)p[5] << 8) |
-                ((uint32_t)p[6] << 16);
-        inv_state = (uint32_t)p[7] | ((uint32_t)p[8] << 8) |
-                    ((uint32_t)p[9] << 16);
-        if (((state ^ inv_state) & 0x00ffffffu) != 0x00ffffffu)
+                ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+        inv_state = (uint32_t)p[8] | ((uint32_t)p[9] << 8) |
+                    ((uint32_t)p[10] << 16) | ((uint32_t)p[11] << 24);
+        if (((state ^ inv_state) & UART_VCD_GPIO_MASK) != UART_VCD_GPIO_MASK)
             return -1;
-        if (p[10] != 0x55 || p[11] != 0xAA)
+        if ((state & ~UART_VCD_GPIO_MASK) != 0 ||
+            (inv_state & ~UART_VCD_GPIO_MASK) != ~UART_VCD_GPIO_MASK)
+            return -1;
+        if (p[12] != UART_VCD_SYNC_MAGIC0 ||
+            p[13] != UART_VCD_SYNC_MAGIC1 ||
+            p[14] != UART_VCD_SYNC_MAGIC2 ||
+            p[15] != UART_VCD_SYNC_MAGIC3)
             return -1;
         return UART_VCD_SYNC_FRAME_SIZE;
     }
@@ -199,7 +210,7 @@ static int ev3_frame_size(const struct uart_vcd_context *ctx,
 
     if (len < 6)
         return 0;
-    if (p[4] > 7)
+    if (p[4] >= UART_VCD_TEXT_CHANNELS)
         return -1;
     if (header == 0x80 && p[5] > UART_VCD_MAX_LABEL_LEN - 1)
         return -1;
@@ -252,7 +263,7 @@ static void emit_text_annotation(struct uart_vcd_context *ctx,
     size_t pos = 0;
     int i;
 
-    if (channel < 0 || channel > 7)
+    if (channel < 0 || channel >= UART_VCD_TEXT_CHANNELS)
         return;
 
     if (render_hex) {
@@ -288,7 +299,8 @@ static void emit_label_update(struct uart_vcd_context *ctx,
     struct sr_datafeed_packet pkt;
     struct sr_datafeed_uart_vcd_text text;
 
-    if (channel < 0 || channel > 7 || ctx->labels[channel][0] == '\0')
+    if (channel < 0 || channel >= UART_VCD_TEXT_CHANNELS ||
+        ctx->labels[channel][0] == '\0')
         return;
 
     text.start_sample = ctx->collected_samples;
@@ -317,6 +329,10 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
     if (frame_size <= 0)
         return frame_size;
 
+    header = p[3];
+    if (!ctx->sync_seen && header != UART_VCD_HEADER_SYNC)
+        return frame_size;
+
     delta_raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
                 ((uint32_t)p[2] << 16);
     delta_samples = delta_raw;
@@ -327,7 +343,6 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
         delta_samples = 1;
     }
 
-    header = p[3];
     if (!(header & 0x80)) {
         const uint8_t sub = (header >> 5) & 3;
         const int channel = header & 0x1F;
@@ -335,26 +350,34 @@ static int ev3_blow_buf(struct uart_vcd_context *ctx,
         if (!ctx->is_loop && target > ctx->total_samples)
             target = ctx->total_samples;
         advance_time(ctx, target);
-        if (channel <= 23) {
+        if (channel < UART_VCD_GPIO_PROBES) {
             const uint32_t mask = 1u << channel;
             if (sub == 0)
                 ctx->gpio_state &= ~mask;
             else
                 ctx->gpio_state |= mask;
             ctx->output_state =
-                (ctx->output_state & 0xff000000u) | ctx->gpio_state;
+                (ctx->output_state & UART_VCD_NON_GPIO_MASK) | ctx->gpio_state;
             record_state(ctx, sdi);
         }
     } else if (header == UART_VCD_HEADER_SYNC) {
         const uint32_t state = (uint32_t)p[4] |
-            ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16);
-        uint64_t target = ctx->collected_samples + delta_samples;
-        if (!ctx->is_loop && target > ctx->total_samples)
-            target = ctx->total_samples;
-        advance_time(ctx, target);
-        ctx->gpio_state = state & 0x00ffffffu;
+            ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) |
+            ((uint32_t)p[7] << 24);
+        if (!ctx->sync_seen) {
+            ctx->sync_seen = TRUE;
+            ctx->first_event = FALSE;
+            advance_time(ctx, 0);
+            sr_info("initial sync received; capture sample zero established");
+        } else {
+            uint64_t target = ctx->collected_samples + delta_samples;
+            if (!ctx->is_loop && target > ctx->total_samples)
+                target = ctx->total_samples;
+            advance_time(ctx, target);
+        }
+        ctx->gpio_state = state & UART_VCD_GPIO_MASK;
         ctx->output_state =
-            (ctx->output_state & 0xff000000u) | ctx->gpio_state;
+            (ctx->output_state & UART_VCD_NON_GPIO_MASK) | ctx->gpio_state;
         record_state(ctx, sdi);
     } else if (header == 0x80) {
         const int channel = p[4];
@@ -453,6 +476,7 @@ static int tcp_reconnect(struct uart_vcd_context *ctx)
     { uint8_t d[1024]; while (read(ctx->tcp_fd,d,sizeof(d))>0); }
     ctx->input_len=0; ctx->input_offset=0; ctx->gpio_state=0;
     ctx->first_event=TRUE;
+    ctx->sync_seen=FALSE;
     return SR_OK;
 }
 
@@ -598,11 +622,12 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     (void)cb_data; struct uart_vcd_context *ctx; assert(sdi->priv); ctx=sdi->priv;
 
     ctx->collected_samples=0; ctx->collecting=TRUE; ctx->end_sent=FALSE;
-    ctx->recorded_state=0xff000000u; ctx->activity_mask=0;
+    ctx->recorded_state=UART_VCD_NON_GPIO_MASK; ctx->activity_mask=0;
     ctx->activity_report_sample=0; ctx->parsed_events=0;
     ctx->bad_packets=0; ctx->recovered_packets=0;
     ctx->dropped_input_bytes=0;
-    ctx->gpio_state=0; ctx->output_state=0xff000000u;
+    ctx->gpio_state=0; ctx->output_state=UART_VCD_NON_GPIO_MASK;
+    ctx->sync_seen=FALSE;
     ctx->input_len=0; ctx->input_offset=0; ctx->event_count=0;
     init_default_labels(ctx);
 
@@ -617,12 +642,7 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
         sr_err("malloc failed");
         return SR_ERR_MALLOC;
     }
-    ctx->event_buf[0].sample=0;
-    ctx->event_buf[0].state=ctx->output_state;
-    ctx->event_buf[0].reserved=0;
-    ctx->event_count=1;
-
-    sr_info("Start acquisition on TCP port %d, samplerate=%llu",
+    sr_info("Start acquisition on TCP port %d, samplerate=%llu, waiting for sync",
             ctx->tcp_port,(unsigned long long)ctx->samplerate);
     sr_session_source_add(ctx->tcp_fd, G_IO_IN, 100, receive_data_event, sdi);
     return SR_OK;
@@ -715,7 +735,7 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
             }
         }
     }
-    if (ctx->collecting)
+    if (ctx->collecting && ctx->sync_seen)
         flush_event_batch(ctx, sdi);
     return ctx->collecting ? TRUE : FALSE;
 }

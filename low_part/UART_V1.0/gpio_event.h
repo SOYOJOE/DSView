@@ -33,9 +33,10 @@ enum {
     GPIO_EVENT_RENDER_MODE_ASCII = 1,
 };
 #define GPIO_EVENT_SYS_CLOCK_HZ    24000000
+#define GPIO_EVENT_GPIO_MAX        27
+#define GPIO_EVENT_RENDER_MAX      3
 #define GPIO_EVENT_MAX_CHANNELS    32
-#define GPIO_EVENT_GPIO_MAX        23
-#define GPIO_EVENT_UART_OFFSET     24
+#define GPIO_EVENT_UART_OFFSET     28
 #define GPIO_EVENT_UART_BAUD       1000000
 #define GPIO_EVENT_UART_NUM        0
 #define GPIO_EVENT_UART_MARKER     0x80
@@ -57,7 +58,7 @@ void gpio_event_toggle(int channel);
 
 /*
  * Interrupt-only fast path. These functions do no channel validation and must
- * only be called with channel 0..23 from an ISR. Use one event-producing
+ * only be called with channel 0..27 from an ISR. Use one event-producing
  * context: while these APIs are active, do not call regular GPIO/string or
  * user_uart_* APIs. The main loop may keep calling uart_tx_poll().
  */
