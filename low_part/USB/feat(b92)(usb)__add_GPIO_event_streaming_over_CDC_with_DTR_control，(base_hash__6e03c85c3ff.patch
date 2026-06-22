@@ -1,0 +1,1080 @@
+Subject: [PATCH] feat(b92)(usb): add GPIO event streaming over CDC with DTR control，(base hash: 6e03c85c3ff1b76e854d23b50469ba6b63c3fec2)
+---
+Index: demo/vendor/common/common/build_config.h
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/common/common/build_config.h b/demo/vendor/common/common/build_config.h
+--- a/demo/vendor/common/common/build_config.h	(revision 6e03c85c3ff1b76e854d23b50469ba6b63c3fec2)
++++ b/demo/vendor/common/common/build_config.h	(date 1782108856728)
+@@ -26,5 +26,5 @@
+ #ifndef BUILD_CONFIG_H
+ #define BUILD_CONFIG_H
+ 
+-#define CURRENT_BUILD_STIMER_Demo       1//Compile option name
+-#endif
+\ No newline at end of file
++#define CURRENT_BUILD_USB_Demo       1//Compile option name
++#endif
+Index: AGENTS.md
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+--- /dev/null	(date 1782118415604)
++++ b/AGENTS.md	(date 1782118415604)
+@@ -0,0 +1,48 @@
++# Repository Guidelines
++
++## Project Structure & Module Organization
++
++This repository is a Telink platform SDK organized by hardware, shared middleware, demos, and build tooling.
++
++- `chip/`: MCU-specific startup, drivers, link scripts, and low-level libraries, grouped by chip family such as `B92`, `B91`, `TL321X`, and `W92`.
++- `common/`: shared SDK utilities, USB debug support, and common protocol code.
++- `demo/vendor/`: application demos. The active USB work is under `demo/vendor/USB_Demo/`.
++- `demo/vendor/common/`: shared demo configuration and board support.
++- `cmake_configs/`: generated/maintained CMake target descriptions, for example `TL_PLATFORM_SDK_B92_cmake.json`.
++- `tools/`: SDK helper scripts for config generation, firmware checks, secure boot, and release packaging.
++- `cmake_builds/` and `compile_commands.json`: generated build outputs; avoid hand-editing them.
++
++## Build, Test, and Development Commands
++
++Configure the B92 CMake build:
++
++```bash
++cmake -S . -B cmake_builds/TL_PLATFORM_SDK_B92/TL32_ELF_MCULIB_V5F_GCC12_2 -G Ninja \
++  -DPROJECT_NAME=TL_PLATFORM_SDK_B92 \
++  -DTOOLCHAIN_NAME="TL32 ELF MCULIB V5F GCC12.2" \
++  -DTOOLCHAIN_PATH=/home/soyo/Telink/toolchain/RDS/V5.3.x/toolchains/nds32le-elf-mculib-v5f
++```
++
++Build the current USB demo:
++
++```bash
++cmake --build cmake_builds/TL_PLATFORM_SDK_B92/TL32_ELF_MCULIB_V5F_GCC12_2 --target USB_Demo
++```
++
++The build runs SDK pre/post scripts and produces `.elf`, `.bin`, and `.lst` artifacts in the build directory.
++
++## Coding Style & Naming Conventions
++
++The codebase is C-oriented and compiled with strict warnings (`-Werror`, `-Wall`, `-Wextra`). Follow nearby file style: 4-space indentation, lower_snake_case function names, uppercase macros, and SDK attributes such as `_attribute_ram_code_sec_` where timing requires RAM execution. Keep comments short and only where they clarify hardware timing or protocol behavior.
++
++## Testing Guidelines
++
++There is no centralized unit-test framework in this tree. Validate changes by building the affected target and, for firmware behavior, testing on hardware with the relevant PC-side tool or logic analyzer. For USB CDC changes, verify enumeration, DTR/open-port behavior, endpoint timing, and protocol byte-stream compatibility.
++
++## Commit & Pull Request Guidelines
++
++Recent commits use scoped conventional-style subjects, for example `feat(tl321x)(sys): add ret_ldo voltage calibration`. Prefer concise subjects with chip/module scopes: `fix(b92)(usb): stabilize cdc tx queue`. Pull requests should describe the target chip/demo, build command used, hardware validation performed, and any protocol or timing impact.
++
++## Agent-Specific Instructions
++
++Do not overwrite generated build artifacts unless a build command updates them. Keep edits scoped to the active target and preserve unrelated local changes.
+Index: demo/vendor/USB_Demo/application/usb_app/usbcdc.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/USB_Demo/application/usb_app/usbcdc.c b/demo/vendor/USB_Demo/application/usb_app/usbcdc.c
+--- a/demo/vendor/USB_Demo/application/usb_app/usbcdc.c	(revision 6e03c85c3ff1b76e854d23b50469ba6b63c3fec2)
++++ b/demo/vendor/USB_Demo/application/usb_app/usbcdc.c	(date 1782109888467)
+@@ -29,6 +29,7 @@
+ volatile unsigned short usb_cdc_data_len;
+ unsigned int   usb_cdc_tx_cnt;
+ unsigned char  LineCoding[7] = {0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08};
++volatile unsigned short usb_cdc_control_line_state;
+ 
+ /**
+  * @brief       This function serves to send data to USB host in CDC device.
+Index: demo/vendor/USB_Demo/application/usbstd/usb.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/USB_Demo/application/usbstd/usb.c b/demo/vendor/USB_Demo/application/usbstd/usb.c
+--- a/demo/vendor/USB_Demo/application/usbstd/usb.c	(revision 6e03c85c3ff1b76e854d23b50469ba6b63c3fec2)
++++ b/demo/vendor/USB_Demo/application/usbstd/usb.c	(date 1782117999766)
+@@ -39,6 +39,7 @@
+ 
+     #if (USB_CDC_ENABLE)
+         #include "../usb_app/usbcdc_i.h"
++        #include "../../usb_gpio_event.h"
+     #endif
+ 
+ 
+@@ -325,7 +326,7 @@
+     switch (property) {
+     #if (USB_CDC_ENABLE) //for cdc
+     case CDC_REQ_SetControlLine_State:
+-
++        usb_cdc_control_line_state = control_request.Value;
+         break;
+     case CDC_REQ_SetLine_Encoding: //--2-2. set serial parameter:baudrate,check,stop and data
+ 
+@@ -926,7 +927,7 @@
+         usb_handle_ctl_ep_status();
+     }
+ 
+-    #if (USB_CDC_ENABLE)
++    #if (USB_CDC_ENABLE && !defined(MCU_CORE_B92))
+     usb_cdc_irq_data_process();
+     #endif
+ 
+@@ -1056,10 +1057,16 @@
+ {
+     unsigned char irq = usbhw_get_eps_irq();
+ 
++    if (irq & (BIT(USB_PHYSICAL_EDP_CDC_IN) | BIT(USB_PHYSICAL_EDP_CDC_OUT))) {
++        gpio_set_high_level(LED3);
++    }
++
+     if (irq & BIT(USB_PHYSICAL_EDP_CDC_IN)) {
+         usbhw_clr_eps_irq(BIT(USB_PHYSICAL_EDP_CDC_IN));
+         usbhw_reset_ep_ptr(USB_PHYSICAL_EDP_CDC_IN);
+         usb_cdc_tx_cnt++;
++        usb_gpio_event_tx_complete();
++        usb_cdc_upload_try_queue_packet();
+     }
+     // CDC host-to-device data Output IRQ
+     if (irq & BIT(USB_PHYSICAL_EDP_CDC_OUT)) {
+@@ -1073,6 +1080,10 @@
+             usbhw_data_ep_ack(USB_PHYSICAL_EDP_CDC_OUT);
+         }
+     }
++
++    if (irq & (BIT(USB_PHYSICAL_EDP_CDC_IN) | BIT(USB_PHYSICAL_EDP_CDC_OUT))) {
++        gpio_set_low_level(LED3);
++    }
+ }
+     #endif
+ 
+Index: demo/vendor/common/common/app_config/usb_app_config.h
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/common/common/app_config/usb_app_config.h b/demo/vendor/common/common/app_config/usb_app_config.h
+--- a/demo/vendor/common/common/app_config/usb_app_config.h	(revision 6e03c85c3ff1b76e854d23b50469ba6b63c3fec2)
++++ b/demo/vendor/common/common/app_config/usb_app_config.h	(date 1782109256946)
+@@ -64,7 +64,7 @@
+ #define USB_PRINT     8 /* TL7518, TL721X, TL321X don't support hardware enumeration into print device.
+                                  Please use software enumeration instead of hardware enumeration. */
+ 
+-#define USB_DEMO_TYPE USB_MOUSE
++#define USB_DEMO_TYPE USB_CDC
+ 
+ #if (USB_DEMO_TYPE == USB_MOUSE)
+     #define USB_MOUSE_ENABLE 1
+Index: demo/vendor/USB_Demo/cdc_app.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/USB_Demo/cdc_app.c b/demo/vendor/USB_Demo/cdc_app.c
+--- a/demo/vendor/USB_Demo/cdc_app.c	(revision 6e03c85c3ff1b76e854d23b50469ba6b63c3fec2)
++++ b/demo/vendor/USB_Demo/cdc_app.c	(date 1782120631863)
+@@ -25,49 +25,88 @@
+ #if (USB_DEMO_TYPE == USB_CDC)
+     #include "application/usb_app/usbcdc.h"
+     #include "application/usbstd/usb.h"
++    #include "usb_gpio_event.h"
+ 
+-    #if defined(MCU_CORE_B92) || defined(MCU_CORE_TL7518) || defined(MCU_CORE_TL751X)
++#if !defined(MCU_CORE_B92)
++    #error "This USB_Demo CDC throughput test is trimmed for B92 only."
++#endif
++
+ extern volatile unsigned int g_vbus_timer_turn_off_start_tick;
+ extern volatile unsigned int g_vbus_timer_turn_off_flag;
+-    #endif
+-
+-    #define DEVICE_SEND_DATA_BLOCK     (0) /* blocking send data. */
+-    #define DEVICE_SEND_DATA_NON_BLOCK (1) /* non-blocking send data. */
+-    #define DEVICE_SEND_DATA_MODE      DEVICE_SEND_DATA_BLOCK
++
++#define CDC_UPLOAD_START_ON_CONFIGURED 1
++#define CDC_UPLOAD_START_ON_DTR        2
++#define CDC_UPLOAD_START_MODE          CDC_UPLOAD_START_ON_DTR
++#define CDC_UPLOAD_TOGGLE_INTERVAL_US  400
++#define CDC_UPLOAD_SYNC_INTERVAL_US    20000
++#define CDC_UPLOAD_CONTROL_POLL_US     10000
++#define CDC_UPLOAD_GPIO_MASK           0x0fffffffu
++
++#define USB_DBG_LED0 LED1
++#define USB_DBG_LED1 LED2
++#define USB_DBG_LED2 LED3
++
++static unsigned char cdc_upload_enabled;
++
++static void usb_cdc_debug_gpio_init(void)
++{
++    gpio_function_en(USB_DBG_LED0);
++    gpio_input_dis(USB_DBG_LED0);
++    gpio_output_en(USB_DBG_LED0);
++    gpio_set_low_level(USB_DBG_LED0);
++
++    gpio_function_en(USB_DBG_LED1);
++    gpio_input_dis(USB_DBG_LED1);
++    gpio_output_en(USB_DBG_LED1);
++    gpio_set_low_level(USB_DBG_LED1);
++
++    gpio_function_en(USB_DBG_LED2);
++    gpio_input_dis(USB_DBG_LED2);
++    gpio_output_en(USB_DBG_LED2);
++    gpio_set_low_level(USB_DBG_LED2);
++}
++
++void usb_cdc_upload_try_queue_packet(void)
++{
++    (void)usb_gpio_event_tx_try_queue_packet();
++}
++
++static unsigned char usb_cdc_upload_should_run(void)
++{
++#if (CDC_UPLOAD_START_MODE == CDC_UPLOAD_START_ON_DTR)
++    return (g_usb_config != 0) && ((usb_cdc_control_line_state & CDC_CONTROL_LINE_OUT_DTR) != 0);
++#else
++    return g_usb_config != 0;
++#endif
++}
+ 
+-    #if (DEVICE_SEND_DATA_MODE == DEVICE_SEND_DATA_NON_BLOCK)
+-/**
+- * @brief       This function serves to send data to USB host in CDC device.
+- * @param[in]   data_ptr -  the pointer of data, which need to be sent.
+- * @param[in]   data_len -  the length of data, which need to be sent.
+- * @retval      0 - success.
+- * @retval      1 - parameters error.
+- * @note
+- *              - The maximum transmit length supported by this function is CDC_TXRX_EPSIZE;
+- *              - This function is non-blocking and returns immediately after the data is filled into the USB buffer.
+- */
+-unsigned int usb_cdc_tx_data_to_host_non_block(unsigned char *data_ptr, unsigned int data_len)
++static void usb_cdc_control_poll(unsigned int now, unsigned char streaming)
+ {
+-    if (data_len > CDC_TXRX_EPSIZE) {
+-        return 1;
+-    }
++    static unsigned int control_poll_tick;
+ 
+-    usbhw_reset_ep_ptr(USB_PHYSICAL_EDP_CDC_IN);
+-    while (data_len-- > 0) {
+-        reg_usb_ep_dat(USB_PHYSICAL_EDP_CDC_IN) = (*data_ptr);
+-
+-        ++data_ptr;
++    if (!streaming ||
++        usbhw_get_ctrl_ep_irq() ||
++        usbhw_get_irq_status(USB_IRQ_RESET_STATUS) ||
++        usbhw_get_irq_status(USB_IRQ_SUSPEND_STATUS) ||
++        clock_time_exceed(control_poll_tick, CDC_UPLOAD_CONTROL_POLL_US)) {
++        control_poll_tick = now;
++        gpio_set_high_level(USB_DBG_LED1);
++        usb_handle_irq();
++        gpio_set_low_level(USB_DBG_LED1);
+     }
+-    usbhw_data_ep_ack(USB_PHYSICAL_EDP_CDC_IN);
++}
+ 
+-    return 0;
++_attribute_ram_code_sec_ void usb_cdc_endpoint_irq_handler(void)
++{
++    usb_cdc_irq_data_process();
+ }
+-
+-    #endif
++PLIC_ISR_REGISTER(usb_cdc_endpoint_irq_handler, IRQ_USB_ENDPOINT)
+ 
+ void user_init(void)
+ {
+     usb_init();
++    usb_cdc_debug_gpio_init();
++    gpio_event_init();
+ 
+     /* set data endpoint buffer size and addr */
+     usbhw_set_eps_max_size(CDC_TXRX_EPSIZE); /* max 64 */
+@@ -75,45 +114,11 @@
+     usbhw_set_ep_addr(USB_PHYSICAL_EDP_CDC_IN, CDC_NOTIFICATION_EPSIZE);
+     usbhw_set_ep_addr(USB_PHYSICAL_EDP_CDC_OUT, CDC_NOTIFICATION_EPSIZE + CDC_TXRX_EPSIZE);
+ 
+-    #if (!defined(MCU_CORE_B91) && !defined(MCU_CORE_B92) && (USB_MAP_EN == 1))
+-    /* When map enable, for the device side, there are three physical endpoints: notify endpoint 2, IN endpoint 4 and OUT endpoint 5. */
+-    usbhw_ep_map_en(EP_MAP_AUTO_EN);
+-    usbhw_set_eps_map_en(BIT(USB_PHYSICAL_EDP_CDC_OUT));
+-    /* enable data endpoint CDC_NOTIFICATION_EPNUM and USB_PHYSICAL_EDP_CDC_OUT. */
+-    usbhw_set_eps_en(BIT(CDC_NOTIFICATION_EPNUM) | BIT(USB_PHYSICAL_EDP_CDC_OUT));
+-    /* host sends data to logical endpoint 5, because our physical endpoint supports OUT, the physical endpoint and logical endpoint are the same, no mapping is needed. \n
+-     * host get data from logical endpoint 5, because our physical endpoints only support OUT, then you need to logical endpoint 5 mapping to any physical endpoint that supports IN,
+-     * the software only needs to configure the mapping relationship, the hardware will parse itself!
+-     */
+-    usbhw_set_ep_map(USB_PHYSICAL_EDP_CDC_OUT, USB_PHYSICAL_EDP_CDC_IN);
+-    #else
+     /* enable data endpoint CDC_NOTIFICATION_EPNUM, USB_PHYSICAL_EDP_CDC_IN and USB_PHYSICAL_EDP_CDC_OUT. */
+     usbhw_set_eps_en(BIT(CDC_NOTIFICATION_EPNUM) | BIT(USB_PHYSICAL_EDP_CDC_IN) | BIT(USB_PHYSICAL_EDP_CDC_OUT));
+-    #endif
+-
+-    #if (USB_ENUM_IN_INTERRUPT == 1)
+-    /* enable global interrupt */
+-    core_interrupt_enable();
+-    /* enable sof irq */
+-    usbhw_set_irq_mask(USB_IRQ_SOF_MASK);
+-    plic_interrupt_enable(IRQ_USB_250US_OR_SOF);
+-    #endif
+-
+-#if defined(MCU_CORE_TL721X) && (USB_CDC_ENABLE)
+-    core_interrupt_enable();
+-
+-    plic_interrupt_enable(IRQ_USB_CTRL_EP_SETUP);
+-    plic_interrupt_enable(IRQ_USB_CTRL_EP_DATA);
+-    plic_interrupt_enable(IRQ_USB_CTRL_EP_STATUS);
+-    plic_interrupt_enable(IRQ_USB_RESET);
+-    plic_interrupt_enable(IRQ_USB_PWDN);
+-    plic_interrupt_enable(IRQ_USB_ENDPOINT);
+-
+-    usbhw_set_irq_mask(USB_IRQ_SETUP_MASK | USB_IRQ_DATA_MASK | USB_IRQ_STATUS_MASK | USB_IRQ_RESET_MASK |
+-                    USB_IRQ_SUSPEND_MASK); /* Note that once the usb enters suspend mode, the suspend interrupt will always be triggered, \n
+-                                              if you want it to be triggered only once, you can turn off this mask in the corresponding ISR. */
+     usbhw_set_eps_irq_mask(BIT(USB_PHYSICAL_EDP_CDC_IN) | BIT(USB_PHYSICAL_EDP_CDC_OUT));
+-#endif
++    plic_interrupt_enable(IRQ_USB_ENDPOINT);
++    core_interrupt_enable();
+ 
+     // enable USB DP pull up 1.5k
+     usb_set_pin(1);
+@@ -121,11 +126,17 @@
+ 
+ void main_loop(void)
+ {
++    unsigned int t = stimer_get_tick();
++    static unsigned int toggle_tick;
++    static unsigned int sync_tick;
++    static unsigned char sync_inited;
++    static unsigned char cdc_upload_prev_enabled;
++
+     /**
+      * @attention   When using the vbus (not vbat) power supply, you must turn off the vbus timer,
+      *              otherwise the MCU will be reset after 8s.
+      */
+-    #if (defined(MCU_CORE_B92) || defined(MCU_CORE_TL7518) || defined(MCU_CORE_TL751X) && (POWER_SUPPLY_MODE == VBUS_POWER_SUPPLY))
++#if (POWER_SUPPLY_MODE == VBUS_POWER_SUPPLY)
+     /**
+      *When using the vbus (not vbat) power supply, the vbus detect status remains at 1. Conversely, it is 0.
+      */
+@@ -142,59 +153,44 @@
+         g_vbus_timer_turn_off_start_tick = stimer_get_tick();
+         g_vbus_timer_turn_off_flag       = 0;
+     }
+-    #endif
+-
+-#if defined(MCU_CORE_TL721X) && (USB_CDC_ENABLE)
+-    /* attention tl721x usb enum in interrupt */
+-#else
+-    usb_handle_irq();
+ #endif
+ 
+-    if (usb_cdc_data_len != 0) {
+-    #if (DEVICE_SEND_DATA_MODE == DEVICE_SEND_DATA_BLOCK)
+-        usb_cdc_tx_data_to_host(usb_cdc_data, usb_cdc_data_len);
+-    #else
+-        unsigned char *ptr    = usb_cdc_data;
+-        unsigned int   div    = usb_cdc_data_len / CDC_TXRX_EPSIZE;
+-        unsigned int   remain = usb_cdc_data_len % CDC_TXRX_EPSIZE;
+-        /* send divisor data of CDC_TXRX_EPSIZE.*/
+-        for (unsigned int i = 0; i < div; i++) {
+-            usb_cdc_tx_data_to_host_non_block(ptr, CDC_TXRX_EPSIZE);
+-            /* If the endpoint is busy, you can either work on other tasks or wait for the endpoint to idle. */
+-            if (usbhw_is_ep_busy(USB_PHYSICAL_EDP_CDC_IN)) {
+-                unsigned int ref_tick = stimer_get_tick();
+-                while (usbhw_is_ep_busy(USB_PHYSICAL_EDP_CDC_IN)) /* waiting for endpoint to not be busy. */
+-                {
+-                    if (clock_time_exceed(ref_tick, 1000)) {
+-                        /* some exceptions occur, such as the usb disconnecting. */
+-                    }
+-                }
+-            }
+-            ptr += CDC_TXRX_EPSIZE;
+-        }
++    usb_cdc_control_poll(t, cdc_upload_prev_enabled);
+ 
+-        /* send remainder data of CDC_TXRX_EPSIZE.*/
+-        if (remain) {
+-            usb_cdc_tx_data_to_host_non_block(ptr, remain);
+-            /* If the endpoint is busy, you can either work on other tasks or wait for the endpoint to idle. */
+-            if (usbhw_is_ep_busy(USB_PHYSICAL_EDP_CDC_IN)) {
+-                unsigned int ref_tick = stimer_get_tick();
+-                while (usbhw_is_ep_busy(USB_PHYSICAL_EDP_CDC_IN)) /* waiting for endpoint to not be busy. */
+-                {
+-                    if (clock_time_exceed(ref_tick, 1000)) {
+-                        /* some exceptions occur, such as the usb disconnecting. */
+-                    }
+-                }
+-            }
+-            ptr += remain;
+-        } else {
+-            /* send zero length packet. */
+-            usbhw_reset_ep_ptr(USB_PHYSICAL_EDP_CDC_IN);
+-            usbhw_data_ep_ack(USB_PHYSICAL_EDP_CDC_IN);
++    cdc_upload_enabled = usb_cdc_upload_should_run();
++    cdc_upload_enabled = (usb_device_status_get() != USB_DEVICE_SUSPEND) && cdc_upload_enabled;
++    usb_cdc_data_len   = 0;
++
++    if (cdc_upload_enabled != cdc_upload_prev_enabled) {
++        usb_gpio_event_set_enabled(0);
++        gpio_event_init();
++        toggle_tick = t;
++        sync_inited = 0;
++
++        if (cdc_upload_enabled) {
++            usb_gpio_event_set_enabled(1);
++            gpio_event_send_sync();
++            sync_tick   = t;
++            sync_inited = 1;
++            gpio_event_tx();
++        }
++        cdc_upload_prev_enabled = cdc_upload_enabled;
++    } else {
++        usb_gpio_event_set_enabled(cdc_upload_enabled);
++    }
++
++    if (cdc_upload_enabled) {
++        if (!sync_inited || clock_time_exceed(sync_tick, CDC_UPLOAD_SYNC_INTERVAL_US)) {
++            gpio_event_send_sync();
++            sync_tick   = t;
++            sync_inited = 1;
+         }
+ 
+-    #endif
+-        usb_cdc_data_len = 0;
++        if (clock_time_exceed(toggle_tick, CDC_UPLOAD_TOGGLE_INTERVAL_US)) {
++            toggle_tick = t;
++            gpio_event_toggle_mask(CDC_UPLOAD_GPIO_MASK);
++        }
++        gpio_event_tx();
+     }
+ }
+ 
+Index: demo/vendor/USB_Demo/usb_gpio_event.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/USB_Demo/usb_gpio_event.c b/demo/vendor/USB_Demo/usb_gpio_event.c
+new file mode 100644
+--- /dev/null	(date 1782119296494)
++++ b/demo/vendor/USB_Demo/usb_gpio_event.c	(date 1782119296494)
+@@ -0,0 +1,494 @@
++/*
++ * usb_gpio_event.c - EVENT protocol v3 encoder + USB CDC TX backend.
++ *
++ * Wire protocol: [uint24_le delta_ticks][1B header][payload...]
++ * Clock:         24 MHz systimer ticks
++ */
++#include "usb_gpio_event.h"
++
++#if (USB_DEMO_TYPE == USB_CDC)
++
++#include "application/usb_app/usbcdc.h"
++#include "application/usbstd/usb.h"
++#include <string.h>
++
++#define USB_GPIO_EVENT_TX_SIZE USB_GPIO_EVENT_TX_CAPACITY
++#define USB_GPIO_EVENT_TX_MASK (USB_GPIO_EVENT_TX_SIZE - 1u)
++
++#if (USB_GPIO_EVENT_TX_SIZE & USB_GPIO_EVENT_TX_MASK)
++    #error "USB_GPIO_EVENT_TX_SIZE must be a power of 2."
++#endif
++
++#define GPIO_LOW    0x00
++#define GPIO_HIGH   0x20
++#define GPIO_TOGGLE 0x40
++#define HEADER_SYNC       0xA0
++#define HEADER_TEXT_HEX   0xC0
++#define HEADER_TEXT_ASCII 0xE0
++#define GPIO_STATE_MASK   0x0fffffffu
++#define GPIO_EVENT_MAX_FRAME_SIZE 264
++#define SYNC_MAGIC0 0x55
++#define SYNC_MAGIC1 0xAA
++#define SYNC_MAGIC2 0x5A
++#define SYNC_MAGIC3 0xA5
++
++#define USB_DBG_LED0 LED1
++#define USB_GPIO_EVENT_SEND_SHORT_PACKET 0
++
++static unsigned char tx_buf[USB_GPIO_EVENT_TX_SIZE] __attribute__((aligned(4)));
++static volatile unsigned int tx_head;
++static volatile unsigned int tx_tail;
++static volatile int          tx_buffer_lock;
++static volatile unsigned int tx_drop_bytes;
++static volatile unsigned char tx_enabled;
++static volatile unsigned char tx_in_flight;
++
++static uint32_t g_gpio_state;
++static uint32_t g_last_tick;
++static int      g_initialized;
++
++static inline unsigned int tx_used_snapshot(void)
++{
++    return tx_head - tx_tail;
++}
++
++static inline unsigned int tx_free_snapshot(void)
++{
++    return USB_GPIO_EVENT_TX_SIZE - tx_used_snapshot();
++}
++
++static inline void tx_write_at(unsigned int head, unsigned int offset, unsigned char byte)
++{
++    tx_buf[(head + offset) & USB_GPIO_EVENT_TX_MASK] = byte;
++}
++
++static inline void tx_drop(unsigned int n)
++{
++    tx_drop_bytes += n;
++}
++
++static inline int tx_reserve(unsigned int n)
++{
++    if (n > USB_GPIO_EVENT_TX_SIZE) {
++        tx_drop(n);
++        return 0;
++    }
++    if (tx_free_snapshot() < n) {
++        tx_drop(n);
++        return 0;
++    }
++    return 1;
++}
++
++static inline void usb_tx_write_frame4(uint32_t dword)
++{
++    unsigned int head;
++
++    if (!tx_reserve(4)) {
++        return;
++    }
++
++    head = tx_head;
++    tx_write_at(head, 0, (unsigned char)dword);
++    tx_write_at(head, 1, (unsigned char)(dword >> 8));
++    tx_write_at(head, 2, (unsigned char)(dword >> 16));
++    tx_write_at(head, 3, (unsigned char)(dword >> 24));
++    tx_head = head + 4;
++}
++
++static inline void __attribute__((always_inline))
++usb_tx_write_frame4_irq(uint32_t dword)
++{
++    unsigned int head;
++
++    if (tx_buffer_lock || tx_free_snapshot() < 4) {
++        tx_drop(4);
++        return;
++    }
++
++    head = tx_head;
++    tx_write_at(head, 0, (unsigned char)dword);
++    tx_write_at(head, 1, (unsigned char)(dword >> 8));
++    tx_write_at(head, 2, (unsigned char)(dword >> 16));
++    tx_write_at(head, 3, (unsigned char)(dword >> 24));
++    tx_head = head + 4;
++}
++
++static void usb_tx_write_block(const unsigned char *data, unsigned int len)
++{
++    unsigned int head;
++    unsigned int offset;
++
++    if (!tx_reserve(len)) {
++        return;
++    }
++
++    head = tx_head;
++    for (offset = 0; offset < len; offset++) {
++        tx_write_at(head, offset, data[offset]);
++    }
++    tx_head = head + len;
++}
++
++void usb_gpio_event_set_enabled(unsigned char enabled)
++{
++    tx_enabled = enabled;
++}
++
++void usb_gpio_event_reset_tx(void)
++{
++    unsigned int r;
++
++    r = core_interrupt_disable();
++    tx_buffer_lock = 1;
++    tx_head        = 0;
++    tx_tail        = 0;
++    tx_drop_bytes  = 0;
++    tx_in_flight   = 0;
++    tx_buffer_lock = 0;
++    core_restore_interrupt(r);
++}
++
++unsigned int usb_gpio_event_tx_available(void)
++{
++    return tx_used_snapshot();
++}
++
++void usb_gpio_event_tx_complete(void)
++{
++    tx_in_flight = 0;
++}
++
++unsigned char usb_gpio_event_tx_try_queue_packet(void)
++{
++    unsigned int r;
++    unsigned int len;
++
++    r = core_interrupt_disable();
++
++    if (!tx_enabled || tx_in_flight || usbhw_is_ep_busy(USB_PHYSICAL_EDP_CDC_IN)) {
++        core_restore_interrupt(r);
++        return 0;
++    }
++
++    len = tx_used_snapshot();
++    if (len == 0) {
++        core_restore_interrupt(r);
++        return 0;
++    }
++#if (!USB_GPIO_EVENT_SEND_SHORT_PACKET)
++    if (len < CDC_TXRX_EPSIZE) {
++        core_restore_interrupt(r);
++        return 0;
++    }
++#endif
++    if (len > CDC_TXRX_EPSIZE) {
++        len = CDC_TXRX_EPSIZE;
++    }
++
++    gpio_set_high_level(USB_DBG_LED0);
++    usbhw_reset_ep_ptr(USB_PHYSICAL_EDP_CDC_IN);
++    for (unsigned int i = 0; i < len; i++) {
++        reg_usb_ep_dat(USB_PHYSICAL_EDP_CDC_IN) = tx_buf[tx_tail & USB_GPIO_EVENT_TX_MASK];
++        tx_tail++;
++    }
++    usbhw_data_ep_ack(USB_PHYSICAL_EDP_CDC_IN);
++    tx_in_flight = 1;
++    gpio_set_low_level(USB_DBG_LED0);
++    core_restore_interrupt(r);
++
++    return 1;
++}
++
++void uart_tx_poll(void)
++{
++    gpio_event_tx();
++}
++
++void user_uart_send_byte(uint8_t byte)
++{
++    usb_tx_write_block(&byte, 1);
++}
++
++void user_uart_flush(void)
++{
++    while (tx_used_snapshot() != 0) {
++        if (!tx_enabled) {
++            break;
++        }
++        gpio_event_tx();
++    }
++}
++
++static inline void __attribute__((always_inline))
++gpio_event_emit(uint32_t new_state, uint8_t sub_mode, int channel)
++{
++    uint32_t now;
++    uint32_t delta;
++    uint32_t dword;
++
++    if (!g_initialized) {
++        return;
++    }
++
++    now          = stimer_get_tick();
++    delta        = now - g_last_tick;
++    g_last_tick  = now;
++    g_gpio_state = new_state;
++
++    dword = (delta & 0x00ffffffu) | ((uint32_t)(sub_mode | (uint8_t)channel) << 24);
++    usb_tx_write_frame4(dword);
++}
++
++void gpio_event_high(int channel)
++{
++    if ((uint32_t)channel > GPIO_EVENT_GPIO_MAX) {
++        return;
++    }
++    gpio_event_emit(g_gpio_state | (1u << (uint32_t)channel), GPIO_HIGH, channel);
++}
++
++void gpio_event_low(int channel)
++{
++    if ((uint32_t)channel > GPIO_EVENT_GPIO_MAX) {
++        return;
++    }
++    gpio_event_emit(g_gpio_state & ~(1u << (uint32_t)channel), GPIO_LOW, channel);
++}
++
++void gpio_event_toggle(int channel)
++{
++    uint32_t mask;
++
++    if ((uint32_t)channel > GPIO_EVENT_GPIO_MAX) {
++        return;
++    }
++
++    mask = 1u << (uint32_t)channel;
++    if (g_gpio_state & mask) {
++        gpio_event_emit(g_gpio_state & ~mask, GPIO_LOW, channel);
++    } else {
++        gpio_event_emit(g_gpio_state | mask, GPIO_HIGH, channel);
++    }
++}
++
++void gpio_event_toggle_mask(uint32_t mask)
++{
++    unsigned int head;
++    unsigned int offset = 0;
++    uint32_t now;
++    uint32_t delta;
++    uint32_t new_state;
++
++    mask &= GPIO_STATE_MASK;
++    if (!g_initialized || mask == 0) {
++        return;
++    }
++
++    if (!tx_reserve((GPIO_EVENT_GPIO_MAX + 1u) * 4u)) {
++        return;
++    }
++
++    now         = stimer_get_tick();
++    delta       = now - g_last_tick;
++    g_last_tick = now;
++    new_state   = g_gpio_state ^ mask;
++    g_gpio_state = new_state;
++
++    head = tx_head;
++    for (unsigned int channel = 0; channel <= GPIO_EVENT_GPIO_MAX; channel++) {
++        uint32_t channel_mask = 1u << channel;
++        uint8_t sub_mode;
++        uint32_t dword;
++
++        if ((mask & channel_mask) == 0) {
++            continue;
++        }
++
++        sub_mode = (new_state & channel_mask) ? GPIO_HIGH : GPIO_LOW;
++        dword    = (delta & 0x00ffffffu) | ((uint32_t)(sub_mode | (uint8_t)channel) << 24);
++        tx_write_at(head, offset++, (unsigned char)dword);
++        tx_write_at(head, offset++, (unsigned char)(dword >> 8));
++        tx_write_at(head, offset++, (unsigned char)(dword >> 16));
++        tx_write_at(head, offset++, (unsigned char)(dword >> 24));
++        delta = 0;
++    }
++    tx_head = head + offset;
++}
++
++static inline void __attribute__((always_inline))
++gpio_event_emit_irq(uint32_t new_state, uint8_t sub_mode, unsigned int channel)
++{
++    uint32_t now;
++    uint32_t dword;
++
++    now = stimer_get_tick();
++    dword = ((now - g_last_tick) & 0x00ffffffu) |
++            ((uint32_t)(sub_mode | (uint8_t)channel) << 24);
++
++    g_last_tick  = now;
++    g_gpio_state = new_state;
++    usb_tx_write_frame4_irq(dword);
++}
++
++_attribute_ram_code_sec_ void gpio_event_irq_high(unsigned int channel)
++{
++    gpio_event_emit_irq(g_gpio_state | (1u << channel), GPIO_HIGH, channel);
++}
++
++_attribute_ram_code_sec_ void gpio_event_irq_low(unsigned int channel)
++{
++    gpio_event_emit_irq(g_gpio_state & ~(1u << channel), GPIO_LOW, channel);
++}
++
++_attribute_ram_code_sec_ void gpio_event_irq_toggle(unsigned int channel)
++{
++    uint32_t mask = 1u << channel;
++
++    if (g_gpio_state & mask) {
++        gpio_event_emit_irq(g_gpio_state & ~mask, GPIO_LOW, channel);
++    } else {
++        gpio_event_emit_irq(g_gpio_state | mask, GPIO_HIGH, channel);
++    }
++}
++
++void gpio_event_init(void)
++{
++    usb_gpio_event_reset_tx();
++    tx_enabled    = 0;
++    g_gpio_state  = 0;
++    g_last_tick   = stimer_get_tick();
++    g_initialized = 1;
++}
++
++void gpio_event_reset_timer(void)
++{
++    if (!g_initialized) {
++        return;
++    }
++    g_last_tick = stimer_get_tick();
++}
++
++void gpio_event_send_sync(void)
++{
++    unsigned int head;
++    uint32_t now;
++    uint32_t delta;
++    uint32_t dword;
++    uint32_t state;
++    uint32_t inv_state;
++
++    if (!g_initialized || !tx_reserve(16)) {
++        return;
++    }
++
++    now         = stimer_get_tick();
++    delta       = now - g_last_tick;
++    g_last_tick = now;
++
++    state     = g_gpio_state & GPIO_STATE_MASK;
++    inv_state = ~state;
++    dword     = (delta & 0x00ffffffu) | ((uint32_t)HEADER_SYNC << 24);
++
++    head = tx_head;
++    tx_write_at(head, 0, (unsigned char)dword);
++    tx_write_at(head, 1, (unsigned char)(dword >> 8));
++    tx_write_at(head, 2, (unsigned char)(dword >> 16));
++    tx_write_at(head, 3, (unsigned char)(dword >> 24));
++    tx_write_at(head, 4, (unsigned char)state);
++    tx_write_at(head, 5, (unsigned char)(state >> 8));
++    tx_write_at(head, 6, (unsigned char)(state >> 16));
++    tx_write_at(head, 7, (unsigned char)(state >> 24));
++    tx_write_at(head, 8, (unsigned char)inv_state);
++    tx_write_at(head, 9, (unsigned char)(inv_state >> 8));
++    tx_write_at(head, 10, (unsigned char)(inv_state >> 16));
++    tx_write_at(head, 11, (unsigned char)(inv_state >> 24));
++    tx_write_at(head, 12, SYNC_MAGIC0);
++    tx_write_at(head, 13, SYNC_MAGIC1);
++    tx_write_at(head, 14, SYNC_MAGIC2);
++    tx_write_at(head, 15, SYNC_MAGIC3);
++    tx_head = head + 16;
++}
++
++void gpio_event_send_text(gpio_event_level_t level,
++                          gpio_event_render_mode_t render_mode,
++                          const uint8_t *label,
++                          int label_len,
++                          const uint8_t *data,
++                          int data_len)
++{
++    unsigned int head;
++    unsigned int offset;
++    uint32_t now;
++    uint32_t delta;
++    uint32_t dword;
++    uint8_t  header;
++    int      payload_len;
++    int      block_len;
++
++    if (!g_initialized) {
++        return;
++    }
++    if (level < 0 || level > GPIO_EVENT_RENDER_MAX) {
++        return;
++    }
++    if (render_mode != GPIO_EVENT_RENDER_MODE_HEX &&
++        render_mode != GPIO_EVENT_RENDER_MODE_ASCII) {
++        return;
++    }
++    if (label_len < 0 || label_len > 255 || data_len < 0 || data_len > 255) {
++        return;
++    }
++    if ((label_len > 0 && label == 0) || (data_len > 0 && data == 0)) {
++        return;
++    }
++    if (label_len == 0 && data_len == 0) {
++        return;
++    }
++
++    payload_len = 3 + label_len + data_len;
++    block_len   = (payload_len + 3) & ~3;
++    if (4 + block_len > GPIO_EVENT_MAX_FRAME_SIZE || !tx_reserve((unsigned int)(4 + block_len))) {
++        return;
++    }
++
++    now         = stimer_get_tick();
++    delta       = now - g_last_tick;
++    g_last_tick = now;
++
++    header = (render_mode == GPIO_EVENT_RENDER_MODE_HEX) ? HEADER_TEXT_HEX : HEADER_TEXT_ASCII;
++    dword  = (delta & 0x00ffffffu) | ((uint32_t)header << 24);
++
++    head = tx_head;
++    tx_write_at(head, 0, (unsigned char)dword);
++    tx_write_at(head, 1, (unsigned char)(dword >> 8));
++    tx_write_at(head, 2, (unsigned char)(dword >> 16));
++    tx_write_at(head, 3, (unsigned char)(dword >> 24));
++    tx_write_at(head, 4, (uint8_t)level);
++    tx_write_at(head, 5, (uint8_t)label_len);
++    tx_write_at(head, 6, (uint8_t)data_len);
++    offset = 7;
++    if (label_len > 0) {
++        for (int i = 0; i < label_len; i++) {
++            tx_write_at(head, offset++, label[i]);
++        }
++    }
++    if (data_len > 0) {
++        for (int i = 0; i < data_len; i++) {
++            tx_write_at(head, offset++, data[i]);
++        }
++    }
++    while (offset < (unsigned int)(4 + block_len)) {
++        tx_write_at(head, offset++, 0);
++    }
++    tx_head = head + (unsigned int)(4 + block_len);
++}
++
++void gpio_event_tx(void)
++{
++    tx_buffer_lock = 1;
++    (void)usb_gpio_event_tx_try_queue_packet();
++    tx_buffer_lock = 0;
++}
++
++#endif
+Index: demo/vendor/USB_Demo/usb_gpio_event.h
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/USB_Demo/usb_gpio_event.h b/demo/vendor/USB_Demo/usb_gpio_event.h
+new file mode 100644
+--- /dev/null	(date 1782119278121)
++++ b/demo/vendor/USB_Demo/usb_gpio_event.h	(date 1782119278121)
+@@ -0,0 +1,83 @@
++/*
++ * usb_gpio_event.h - MCU-side EVENT protocol v3 encoder over USB CDC.
++ *
++ * The byte stream is compatible with the old UART_VCD EVENT protocol. USB CDC
++ * only replaces the physical transport; frame layout stays unchanged.
++ */
++
++#ifndef USB_GPIO_EVENT_H
++#define USB_GPIO_EVENT_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum {
++    GPIO_EVENT_LEVEL_DEBUG = 0,
++    GPIO_EVENT_LEVEL_INFO  = 1,
++    GPIO_EVENT_LEVEL_WARN  = 2,
++    GPIO_EVENT_LEVEL_ERROR = 3,
++} gpio_event_level_t;
++
++typedef enum {
++    GPIO_EVENT_RENDER_MODE_HEX   = 0,
++    GPIO_EVENT_RENDER_MODE_ASCII = 1,
++} gpio_event_render_mode_t;
++
++#define GPIO_EVENT_SYS_CLOCK_HZ 24000000
++#define GPIO_EVENT_GPIO_MAX     27
++#define GPIO_EVENT_RENDER_MAX   3
++#define GPIO_EVENT_MAX_CHANNELS 32
++#define GPIO_EVENT_UART_OFFSET  28
++#define GPIO_EVENT_UART_BAUD    1000000
++#define GPIO_EVENT_UART_NUM     0
++#define GPIO_EVENT_UART_MARKER  0x80
++#define USB_GPIO_EVENT_TX_CAPACITY 8192u
++
++#include "common.h"
++
++extern void user_init(void);
++extern void main_loop(void);
++
++void gpio_event_init(void);
++void gpio_event_reset_timer(void);
++void gpio_event_high(int channel);
++void gpio_event_low(int channel);
++void gpio_event_toggle(int channel);
++void gpio_event_toggle_mask(uint32_t mask);
++
++/*
++ * Interrupt fast path. Use channel 0..27 only. Keep one event producer context:
++ * while these APIs are active, do not call regular GPIO/string or user_uart_*
++ * APIs from another context. The main loop may keep calling gpio_event_tx().
++ */
++void gpio_event_irq_high(unsigned int channel);
++void gpio_event_irq_low(unsigned int channel);
++void gpio_event_irq_toggle(unsigned int channel);
++
++void gpio_event_send_sync(void);
++void gpio_event_send_text(gpio_event_level_t level,
++                          gpio_event_render_mode_t render_mode,
++                          const uint8_t *label,
++                          int label_len,
++                          const uint8_t *data,
++                          int data_len);
++void gpio_event_tx(void);
++
++void uart_tx_poll(void);
++void user_uart_send_byte(uint8_t byte);
++void user_uart_flush(void);
++
++unsigned int usb_gpio_event_tx_available(void);
++unsigned char usb_gpio_event_tx_try_queue_packet(void);
++void usb_gpio_event_tx_complete(void);
++void usb_gpio_event_set_enabled(unsigned char enabled);
++void usb_gpio_event_reset_tx(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* USB_GPIO_EVENT_H */
+Index: demo/vendor/USB_Demo/application/usb_app/usbcdc.h
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/demo/vendor/USB_Demo/application/usb_app/usbcdc.h b/demo/vendor/USB_Demo/application/usb_app/usbcdc.h
+--- a/demo/vendor/USB_Demo/application/usb_app/usbcdc.h	(revision 6e03c85c3ff1b76e854d23b50469ba6b63c3fec2)
++++ b/demo/vendor/USB_Demo/application/usb_app/usbcdc.h	(date 1782112893907)
+@@ -41,6 +41,7 @@
+ 
+     extern unsigned int  usb_cdc_tx_cnt;
+     extern unsigned char LineCoding[7];
++    extern volatile unsigned short usb_cdc_control_line_state;
+ 
+ 
+     /**
+@@ -56,6 +57,7 @@
+     unsigned char usb_cdc_tx_data_to_host(unsigned char *data_ptr, unsigned int data_len);
+ 
+     void usb_cdc_rx_data_from_host(unsigned char *rx_buff);
++    void usb_cdc_upload_try_queue_packet(void);
+ 
+ 
+     /* Disable C linkage for C++ Compilers: */
