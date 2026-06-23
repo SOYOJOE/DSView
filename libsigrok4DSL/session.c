@@ -60,6 +60,8 @@ struct source {
 	gintptr poll_object;
 };
 
+static int _sr_session_source_remove(gintptr poll_object);
+
 /**
  * Create a new session.
  *
@@ -165,7 +167,7 @@ static int sr_session_iteration(gboolean block)
 					session->pollfds[i].revents,
 					session->sources[i].cb_data)) {
 				sr_info("session: source callback returned FALSE, removing source");
-				sr_session_source_remove(session->sources[i].poll_object);
+				_sr_session_source_remove(session->sources[i].poll_object);
 			}
 		}
 		/*
