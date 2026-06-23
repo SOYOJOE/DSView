@@ -103,13 +103,21 @@ bool AppControl::Init()
         QString pythonHome;
         QDir pydir;
 
-        // Prefer PYTHONHOME env var (set by run.bat for portable deployment),
-        // fall back to compile-time PYTHON3_HOME (dev machine).
+        // Priority: 1) PYTHONHOME env var  2) lib/python3.14 next to exe  3) compile-time PYTHON3_HOME
         QByteArray envHome = qgetenv("PYTHONHOME");
         if (!envHome.isEmpty()) {
             pythonHome = QString::fromLocal8Bit(envHome);
             dsv_info("PYTHONHOME from env: \"%s\"", pythonHome.toUtf8().constData());
         }
+
+        if (pythonHome.isEmpty()) {
+            QString appDir = QCoreApplication::applicationDirPath();
+            if (pydir.exists(appDir + "/lib/python3.14")) {
+                pythonHome = appDir;
+                dsv_info("PYTHONHOME from app dir: \"%s\"", pythonHome.toUtf8().constData());
+            }
+        }
+
 #ifdef PYTHON3_HOME
         if (pythonHome.isEmpty()) {
             pythonHome = QString::fromUtf8(PYTHON3_HOME);
@@ -117,7 +125,7 @@ bool AppControl::Init()
         }
 #endif
         if (pythonHome.isEmpty()) {
-            dsv_err("PYTHONHOME not set and PYTHON3_HOME not defined! Re-run cmake to set it.");
+            dsv_err("PYTHONHOME not set and lib/python3.14 not found next to exe! Re-run cmake to set PYTHON3_HOME.");
         } else if (pydir.exists(pythonHome)) {
             const wchar_t *pyhome = reinterpret_cast<const wchar_t*>(pythonHome.utf16());
             srd_set_python_home(pyhome);
@@ -128,7 +136,9 @@ bool AppControl::Init()
                 SetDllDirectoryW(reinterpret_cast<const wchar_t*>(pythonBin.utf16()));
                 dsv_info("SetDllDirectoryW to \"%s\"", pythonBin.toUtf8().constData());
             } else {
-                dsv_err("Python bin dir not found: \"%s\"", pythonBin.toUtf8().constData());
+                QString appDir = QCoreApplication::applicationDirPath();
+                SetDllDirectoryW(reinterpret_cast<const wchar_t*>(appDir.utf16()));
+                dsv_info("SetDllDirectoryW to app dir: \"%s\"", appDir.toUtf8().constData());
             }
         } else {
             dsv_err("PYTHONHOME dir not found: \"%s\"", pythonHome.toUtf8().constData());

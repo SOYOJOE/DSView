@@ -68,7 +68,11 @@ $dlls = @(
     "libgraphite2.dll",
     "libbrotlidec.dll",
     "libbrotlicommon.dll",
-    "libbz2-1.dll"
+    "libbz2-1.dll",
+    # Python C extension deps
+    "libffi-8.dll",
+    # Qt SVG support (icons)
+    "Qt5Svg.dll"
 )
 
 foreach ($dll in $dlls) {
@@ -148,8 +152,9 @@ if (-not $SkipPython) {
 
     $pyLib = "$MingwLib\python3.14"
     if (Test-Path $pyLib) {
-        Copy-Item "$pyLib\*" "$OutDir\python3.14\" -Recurse -Force
-        Write-Host "  python3.14/"
+        New-Item -ItemType Directory -Force -Path "$OutDir\lib" | Out-Null
+        Copy-Item "$pyLib" "$OutDir\lib\" -Recurse -Force
+        Write-Host "  lib/python3.14/"
     } else {
         Write-Warning "  MISSING: Python stdlib at $pyLib"
     }
@@ -168,7 +173,7 @@ Plugins = .
 # ---- Launch script ----
 $launchBat = @"
 @echo off
-set PYTHONHOME=%~dp0python3.14
+set PYTHONHOME=%~dp0
 set PATH=%~dp0;%PATH%
 start "" "%~dp0DSView.exe"
 "@
