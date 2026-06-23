@@ -596,11 +596,16 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
 static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
 {
     (void)cb_data; struct uart_vcd_context *ctx; assert(sdi->priv); ctx=sdi->priv;
+    sr_info("hw_dev_acquisition_stop: collecting=%d, tcp_fd=%d",
+            ctx->collecting, ctx->tcp_fd);
     if (ctx->collecting)
         send_event_end(ctx, sdi);
     if (ctx->tcp_fd>=0) { uart_vcd_socket_close(ctx->tcp_fd); ctx->tcp_fd=-1; }
 #ifdef _WIN32
-    if (ctx->wsa_event) { WSACloseEvent(ctx->wsa_event); ctx->wsa_event = NULL; }
+    if (ctx->wsa_event) {
+        WSASetEvent(ctx->wsa_event);
+        sr_info("hw_dev_acquisition_stop: WSA event signaled to wake poll");
+    }
 #endif
     return SR_OK;
 }
