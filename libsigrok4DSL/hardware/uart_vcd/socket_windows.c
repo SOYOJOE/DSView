@@ -173,7 +173,6 @@ void uart_vcd_socket_close(int fd)
 {
     if (fd >= 0) {
         SOCKET sock = (SOCKET)fd;
-        WSAEventSelect(sock, NULL, 0);
         closesocket(sock);
     }
 }
