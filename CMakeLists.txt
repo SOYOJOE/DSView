@@ -474,6 +474,17 @@ set(libsigrok4DSL_SOURCES
     libsigrok4DSL/input/input.c
     libsigrok4DSL/hardware/demo/demo.c
     libsigrok4DSL/hardware/uart_vcd/uart_vcd.c
+)
+
+if(WIN32)
+    list(APPEND libsigrok4DSL_SOURCES
+    libsigrok4DSL/hardware/uart_vcd/socket_windows.c)
+else()
+    list(APPEND libsigrok4DSL_SOURCES
+    libsigrok4DSL/hardware/uart_vcd/socket_linux.c)
+endif()
+
+set(libsigrok4DSL_SOURCES ${libsigrok4DSL_SOURCES}
     libsigrok4DSL/input/in_binary.c
     libsigrok4DSL/input/in_vcd.c
     libsigrok4DSL/input/in_wav.c
@@ -648,6 +659,10 @@ add_executable(${PROJECT_NAME}
 	${libsigrok4DSL_SOURCES}
 	${libsigrokdecode4DSL_SOURCES}
 )
+
+if(WIN32)
+	list(APPEND DSVIEW_LINK_LIBS -lws2_32)
+endif()
 
 target_link_libraries(${PROJECT_NAME} ${DSVIEW_LINK_LIBS})
 if(WIN32)

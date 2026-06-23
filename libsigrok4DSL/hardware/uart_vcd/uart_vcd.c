@@ -5,18 +5,12 @@
  * UART VCD driver — TCP-only, protocol v3, 24MHz samplerate.
  */
 
-#define _GNU_SOURCE
 #include "uart_vcd.h"
+#include "socket.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netinet/in.h>
-#include <netdb.h>
 #include <assert.h>
 #include "../../log.h"
 
@@ -396,52 +390,6 @@ static uint64_t ev3_resync_offset(const struct uart_vcd_context *ctx,
         len - (UART_VCD_SYNC_FRAME_SIZE - 1) : 0;
 }
 
-/* ─── TCP ─── */
-static int tcp_connect(const char *host, int port)
-{
-    int fd; struct sockaddr_in addr; struct hostent *he;
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd<0) { sr_err("TCP socket: %s", strerror(errno)); return -1; }
-    he = gethostbyname(host);
-    if (!he) { sr_err("TCP resolve: %s", host); close(fd); return -1; }
-    memset(&addr,0,sizeof(addr)); addr.sin_family=AF_INET;
-    addr.sin_port=htons(port); memcpy(&addr.sin_addr,he->h_addr,he->h_length);
-
-    { int fl=fcntl(fd,F_GETFL,0); fcntl(fd,F_SETFL,fl|O_NONBLOCK); }
-    if (connect(fd,(struct sockaddr*)&addr,sizeof(addr))<0) {
-        if (errno!=EINPROGRESS) {
-            sr_err("TCP connect %s:%d: %s",host,port,strerror(errno)); close(fd); return -1;
-        }
-        struct timeval tv; tv.tv_sec=1; tv.tv_usec=0;
-        fd_set wset; FD_ZERO(&wset); FD_SET(fd,&wset);
-        int ret=select(fd+1,NULL,&wset,NULL,&tv);
-        if (ret<=0) {
-            sr_err("TCP connect %s:%d timeout",host,port); close(fd); return -1;
-        }
-        int err=0; socklen_t len=sizeof(err);
-        getsockopt(fd,SOL_SOCKET,SO_ERROR,&err,&len);
-        if (err) { sr_err("TCP connect %s:%d: %s",host,port,strerror(err)); close(fd); return -1; }
-    }
-
-    sr_info("TCP connected to %s:%d", host, port);
-    return fd;
-}
-
-static int tcp_reconnect(struct uart_vcd_context *ctx)
-{
-    if (ctx->tcp_fd>=0) { close(ctx->tcp_fd); ctx->tcp_fd=-1; }
-    sr_info("TCP connecting to %s:%d...", ctx->tcp_host, ctx->tcp_port);
-    ctx->tcp_fd=tcp_connect(ctx->tcp_host, ctx->tcp_port);
-    if (ctx->tcp_fd<0) { sr_err("TCP connect failed"); return SR_ERR; }
-    { int fl=fcntl(ctx->tcp_fd,F_GETFL,0); fcntl(ctx->tcp_fd,F_SETFL,fl|O_NONBLOCK); }
-    { int rcvbuf=524288; setsockopt(ctx->tcp_fd,SOL_SOCKET,SO_RCVBUF,&rcvbuf,sizeof(rcvbuf)); }
-    { uint8_t d[1024]; while (read(ctx->tcp_fd,d,sizeof(d))>0); }
-    ctx->input_len=0; ctx->input_offset=0; ctx->gpio_state=0;
-    ctx->first_event=TRUE;
-    ctx->sync_seen=FALSE;
-    return SR_OK;
-}
-
 /* ─── Driver ─── */
 static int hw_init(struct sr_context *sr_ctx) { return std_hw_init(sr_ctx, di, LOG_PREFIX); }
 static int hw_clean_up(void) { return SR_OK; }
@@ -490,7 +438,7 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
     struct uart_vcd_context *ctx;
     if (sdi && sdi->priv) {
         ctx=sdi->priv;
-        if (ctx->tcp_fd>=0) { close(ctx->tcp_fd); ctx->tcp_fd=-1; }
+        if (ctx->tcp_fd>=0) { uart_vcd_socket_close(ctx->tcp_fd); ctx->tcp_fd=-1; }
         free(ctx->input_buf);
         free(ctx->event_buf);
         ctx->input_buf = NULL;
@@ -596,7 +544,7 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     ctx->gpio_state=0; ctx->output_state=UART_VCD_NON_GPIO_MASK;
     ctx->sync_seen=FALSE;
     ctx->input_len=0; ctx->input_offset=0; ctx->event_count=0;
-    if (tcp_reconnect(ctx)!=SR_OK) { ctx->collecting=FALSE; return SR_ERR; }
+    if (uart_vcd_socket_reconnect(ctx)!=SR_OK) { ctx->collecting=FALSE; return SR_ERR; }
 
     free(ctx->input_buf);
     free(ctx->event_buf);
@@ -618,7 +566,7 @@ static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
     (void)cb_data; struct uart_vcd_context *ctx; assert(sdi->priv); ctx=sdi->priv;
     if (ctx->collecting)
         send_event_end(ctx, sdi);
-    if (ctx->tcp_fd>=0) { close(ctx->tcp_fd); ctx->tcp_fd=-1; }
+    if (ctx->tcp_fd>=0) { uart_vcd_socket_close(ctx->tcp_fd); ctx->tcp_fd=-1; }
     return SR_OK;
 }
 
@@ -683,7 +631,7 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
             }
 
             {
-                ssize_t n = read(fd, read_buf, sizeof(read_buf));
+                ssize_t n = uart_vcd_socket_read(fd, read_buf, sizeof(read_buf));
                 if (n < 0) { if (errno==EAGAIN||errno==EWOULDBLOCK) break;
                              sr_err("read error: %s",strerror(errno)); return FALSE; }
                 if (n == 0) break;
