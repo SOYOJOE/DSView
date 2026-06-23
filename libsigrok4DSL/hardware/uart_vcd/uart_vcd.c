@@ -5,6 +5,12 @@
  * UART VCD driver — TCP-only, protocol v3, 24MHz samplerate.
  */
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <windows.h>
+#endif
+
 #include "uart_vcd.h"
 #include "socket.h"
 #include <stdio.h>
@@ -453,6 +459,9 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
     if (sdi && sdi->priv) {
         ctx=sdi->priv;
         if (ctx->tcp_fd>=0) { uart_vcd_socket_close(ctx->tcp_fd); ctx->tcp_fd=-1; }
+#ifdef _WIN32
+        if (ctx->wsa_event) { WSACloseEvent(ctx->wsa_event); ctx->wsa_event = NULL; }
+#endif
         free(ctx->input_buf);
         free(ctx->event_buf);
         ctx->input_buf = NULL;
@@ -571,7 +580,16 @@ static int hw_dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
     }
     sr_info("Start acquisition on TCP port %d, samplerate=%llu, waiting for sync",
             ctx->tcp_port,(unsigned long long)ctx->samplerate);
+#ifdef _WIN32
+    {
+        GPollFD p;
+        p.fd = (gintptr)ctx->wsa_event;
+        p.events = G_IO_IN;
+        sr_session_source_add_pollfd(&p, 100, receive_data_event, sdi);
+    }
+#else
     sr_session_source_add(ctx->tcp_fd, G_IO_IN, 100, receive_data_event, sdi);
+#endif
     return SR_OK;
 }
 
@@ -581,6 +599,9 @@ static int hw_dev_acquisition_stop(const struct sr_dev_inst *sdi, void *cb_data)
     if (ctx->collecting)
         send_event_end(ctx, sdi);
     if (ctx->tcp_fd>=0) { uart_vcd_socket_close(ctx->tcp_fd); ctx->tcp_fd=-1; }
+#ifdef _WIN32
+    if (ctx->wsa_event) { WSACloseEvent(ctx->wsa_event); ctx->wsa_event = NULL; }
+#endif
     return SR_OK;
 }
 
@@ -606,6 +627,22 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
 
     {
         int ec=0;
+        int read_calls = 0;
+        uint64_t total_read = 0;
+        static int first_call = 1;
+
+        if (first_call) {
+            sr_info("receive_data_event first call, tcp_fd=%d, collecting=%d",
+                    ctx->tcp_fd, ctx->collecting);
+            first_call = 0;
+        }
+
+#ifdef _WIN32
+        {
+            WSANETWORKEVENTS net_events;
+            WSAEnumNetworkEvents((SOCKET)ctx->tcp_fd, ctx->wsa_event, &net_events);
+        }
+#endif
 
         while (ctx->collecting && ec < UART_VCD_EVENT_LIMIT) {
 
@@ -645,10 +682,38 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
             }
 
             {
+#ifdef _WIN32
+                ssize_t n = uart_vcd_socket_read(ctx->tcp_fd, read_buf, sizeof(read_buf));
+#else
                 ssize_t n = uart_vcd_socket_read(fd, read_buf, sizeof(read_buf));
-                if (n < 0) { if (errno==EAGAIN||errno==EWOULDBLOCK) break;
-                             sr_err("read error: %s",strerror(errno)); return FALSE; }
-                if (n == 0) break;
+#endif
+                read_calls++;
+                if (n < 0) {
+                    if (errno==EAGAIN||errno==EWOULDBLOCK) {
+                        if (read_calls == 1 && total_read == 0)
+                            sr_info("TCP read: EAGAIN on first read, no data yet");
+                        break;
+                    }
+                    sr_err("read error: %s",strerror(errno)); return FALSE;
+                }
+                if (n == 0) {
+                    sr_info("TCP read: connection closed by peer after %d reads, %llu bytes",
+                            read_calls, (unsigned long long)total_read);
+                    break;
+                }
+
+                total_read += (uint64_t)n;
+
+                if (total_read <= 64 && total_read - (uint64_t)n < 64) {
+                    char hex[193];
+                    int dump_len = n < 32 ? (int)n : 32;
+                    for (int i = 0; i < dump_len; i++)
+                        snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02X ", read_buf[i]);
+                    hex[dump_len * 3] = '\0';
+                    sr_info("TCP recv: n=%lld, total=%llu, buf[0..%d]=%s",
+                            (long long)n, (unsigned long long)total_read,
+                            dump_len - 1, hex);
+                }
 
                 if (ctx->input_len + (uint64_t)n > UART_VCD_BUFSIZE) {
                     protocol_error(ctx, "input buffer overflow",
@@ -660,6 +725,14 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
                 memcpy(ctx->input_buf + ctx->input_len, read_buf, n);
                 ctx->input_len += (uint64_t)n;
             }
+        }
+
+        if (read_calls > 0 && !ctx->sync_seen) {
+            sr_info("TCP status: read_calls=%d, total_read=%llu, input_len=%llu, "
+                    "sync_seen=%d, bad_packets=%llu",
+                    read_calls, (unsigned long long)total_read,
+                    (unsigned long long)ctx->input_len,
+                    ctx->sync_seen, (unsigned long long)ctx->bad_packets);
         }
     }
     if (ctx->collecting && ctx->sync_seen)

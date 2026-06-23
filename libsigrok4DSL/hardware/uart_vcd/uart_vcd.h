@@ -54,6 +54,9 @@ struct uart_vcd_context {
     uint64_t   recovered_packets;
     uint64_t   dropped_input_bytes;
     gboolean   sync_seen;
+#ifdef _WIN32
+    void      *wsa_event;
+#endif
 };
 
 static const uint64_t uart_vcd_samplerates[] = {
