@@ -115,6 +115,11 @@ int uart_vcd_socket_reconnect(struct uart_vcd_context *ctx)
         return SR_ERR;
 
     if (ctx->tcp_fd >= 0) {
+        if (ctx->wsa_event) {
+            WSAEventSelect((SOCKET)ctx->tcp_fd, NULL, 0);
+            WSACloseEvent(ctx->wsa_event);
+            ctx->wsa_event = NULL;
+        }
         closesocket((SOCKET)ctx->tcp_fd);
         ctx->tcp_fd = -1;
     }
@@ -140,6 +145,22 @@ int uart_vcd_socket_reconnect(struct uart_vcd_context *ctx)
         while (recv(sock, (char*)d, (int)sizeof(d), 0) > 0);
     }
 
+    ctx->wsa_event = WSACreateEvent();
+    if (ctx->wsa_event == WSA_INVALID_EVENT) {
+        sr_err("WSACreateEvent failed");
+        closesocket(sock);
+        ctx->tcp_fd = -1;
+        return SR_ERR;
+    }
+    if (WSAEventSelect(sock, ctx->wsa_event, FD_READ | FD_CLOSE) == SOCKET_ERROR) {
+        sr_err("WSAEventSelect failed");
+        WSACloseEvent(ctx->wsa_event);
+        ctx->wsa_event = NULL;
+        closesocket(sock);
+        ctx->tcp_fd = -1;
+        return SR_ERR;
+    }
+
     ctx->input_len = 0;
     ctx->input_offset = 0;
     ctx->gpio_state = 0;
@@ -150,8 +171,11 @@ int uart_vcd_socket_reconnect(struct uart_vcd_context *ctx)
 
 void uart_vcd_socket_close(int fd)
 {
-    if (fd >= 0)
-        closesocket((SOCKET)fd);
+    if (fd >= 0) {
+        SOCKET sock = (SOCKET)fd;
+        WSAEventSelect(sock, NULL, 0);
+        closesocket(sock);
+    }
 }
 
 ssize_t uart_vcd_socket_read(int fd, void *buf, size_t count)
