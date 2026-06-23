@@ -391,16 +391,30 @@ static uint64_t ev3_resync_offset(const struct uart_vcd_context *ctx,
 }
 
 /* ─── Driver ─── */
-static int hw_init(struct sr_context *sr_ctx) { return std_hw_init(sr_ctx, di, LOG_PREFIX); }
+static int hw_init(struct sr_context *sr_ctx) {
+    sr_info("uart_vcd: hw_init() called");
+    int ret = std_hw_init(sr_ctx, di, LOG_PREFIX);
+    sr_info("uart_vcd: hw_init() result=%d, di->priv=%p", ret, di->priv);
+    return ret;
+}
 static int hw_clean_up(void) { return SR_OK; }
 
 static GSList *hw_scan(GSList *options)
 {
     struct sr_dev_inst *sdi; struct uart_vcd_context *ctx; struct drv_context *drvc;
     GSList *devices=NULL; (void)options;
-    drvc=di->priv; if (drvc->instances) return devices;
-    ctx=calloc(1,sizeof(*ctx)); if (!ctx) return devices;
+    sr_info("uart_vcd: hw_scan() called, di=%p", di);
+    drvc=di->priv;
+    sr_info("uart_vcd: hw_scan() drvc=%p, drvc->instances=%p", drvc, drvc ? drvc->instances : NULL);
+    if (drvc->instances) {
+        sr_info("uart_vcd: hw_scan() skipped - instance already exists");
+        return devices;
+    }
+    ctx=calloc(1,sizeof(*ctx));
+    sr_info("uart_vcd: hw_scan() calloc ctx=%p", ctx);
+    if (!ctx) return devices;
     sdi=sr_dev_inst_new(LOGIC,SR_ST_INACTIVE,"UART_VCD","Uart VCD",NULL);
+    sr_info("uart_vcd: hw_scan() sr_dev_inst_new sdi=%p", sdi);
     if (!sdi) { free(ctx); return NULL; }
     sdi->priv=ctx; sdi->driver=di; sdi->dev_type=DEV_TYPE_USB;
     ctx->tcp_fd=-1; ctx->tcp_port=UART_VCD_DEFAULT_TCP_PORT;

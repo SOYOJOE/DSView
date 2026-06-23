@@ -138,6 +138,7 @@ SR_API int ds_lib_init()
 	drivers = sr_driver_list();
 	for (dr = drivers; *dr; dr++)
 	{
+		sr_info("ds_lib_init: initializing driver '%s'", (*dr)->name);
 		if (sr_driver_init(lib_ctx.sr_ctx, *dr) != SR_OK)
 		{
 			sr_err("Failed to initialize driver '%s'", (*dr)->name);
@@ -1335,7 +1336,10 @@ static void process_attach_event(int isEvent)
 
 		if (dr->driver_type == DRIVER_TYPE_HARDWARE)
 		{
+			sr_info("process_attach_event: scanning driver '%s'", dr->name);
 			dev_list = dr->scan(NULL);
+			sr_info("process_attach_event: driver '%s' returned %d devices", dr->name,
+				dev_list ? g_slist_length(dev_list) : 0);
 			if (dev_list != NULL)
 			{
 				pthread_mutex_lock(&lib_ctx.mutext);

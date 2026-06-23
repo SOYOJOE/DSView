@@ -63,6 +63,7 @@ set(DISABLE_WERROR TRUE) #Build without -Werror
 set(ENABLE_SIGNALS TRUE) #Build with UNIX signals
 set(ENABLE_COTIRE FALSE) #Enable cotire
 set(ENABLE_TESTS  FALSE) #Enable unit tests
+option(ENABLE_CONSOLE "Show console window for log output on Windows (Debug)" ON)
 set(STATIC_PKGDEPS_LIBS FALSE) #Statically link to (pkg-config) libraries
 
 if(WIN32)
@@ -109,7 +110,7 @@ link_directories(${GLIB_LIBDIR})
 #= python3
 #-------------------------------------------------------------------------------
 
-find_package(Python3 COMPONENTS Development QUIET)
+find_package(Python3 COMPONENTS Interpreter Development QUIET)
 
 if (Python3_FOUND)
 	message("----- python3:")
@@ -117,6 +118,18 @@ if (Python3_FOUND)
 	message(STATUS "	 libraries:" ${Python3_LIBRARIES})
 	include_directories(${Python3_INCLUDE_DIRS})
 	set(PY_LIB ${Python3_LIBRARIES})
+
+	if(WIN32)
+		if(Python3_EXECUTABLE)
+			get_filename_component(PYTHON3_HOME "${Python3_EXECUTABLE}" DIRECTORY)
+			get_filename_component(PYTHON3_HOME "${PYTHON3_HOME}" DIRECTORY)
+		else()
+			get_filename_component(PYTHON3_HOME "${Python3_INCLUDE_DIRS}" DIRECTORY)
+			get_filename_component(PYTHON3_HOME "${PYTHON3_HOME}" DIRECTORY)
+		endif()
+		add_definitions(-DPYTHON3_HOME="${PYTHON3_HOME}")
+		message(STATUS "	 home:" ${PYTHON3_HOME})
+	endif()
 else()
      find_package(PythonLibs 3 QUIET)
 
@@ -126,6 +139,13 @@ else()
 	message(STATUS "	 libraries:" ${PYTHON_LIBRARIES})
 	include_directories(${PYTHON_INCLUDE_DIRS})
 	set(PY_LIB ${PYTHON_LIBRARIES})
+
+	if(WIN32)
+		get_filename_component(PYTHON3_HOME "${PYTHON_INCLUDE_DIRS}" DIRECTORY)
+		get_filename_component(PYTHON3_HOME "${PYTHON3_HOME}" DIRECTORY)
+		add_definitions(-DPYTHON3_HOME="${PYTHON3_HOME}")
+		message(STATUS "	 home:" ${PYTHON3_HOME})
+	endif()
      else()
      	message(FATAL_ERROR  "Please install lib python3!")
      endif()
@@ -666,8 +686,13 @@ endif()
 
 target_link_libraries(${PROJECT_NAME} ${DSVIEW_LINK_LIBS})
 if(WIN32)
-# Pass -mwindows so that no "DOS box" will open when PulseView is started.
-set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "-mwindows")
+# Debug: -mconsole so that stderr logs are visible in a console window
+# Release: -mwindows so that no "DOS box" will open when DSView is started
+if(ENABLE_CONSOLE)
+    target_link_options(${PROJECT_NAME} PRIVATE -mconsole)
+else()
+    target_link_options(${PROJECT_NAME} PRIVATE -mwindows)
+endif()
 endif()
 
 if(ENABLE_COTIRE)
@@ -682,12 +707,12 @@ set(DSVIEW_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build.dir")
 
 if(WIN32)
 	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/DSView/res" "${DSVIEW_RUNTIME_DIR}/res"
-		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/lang" "${DSVIEW_RUNTIME_DIR}/lang"
-		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/DSView/demo" "${DSVIEW_RUNTIME_DIR}/demo"
-		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/libsigrokdecode4DSL/decoders" "${DSVIEW_RUNTIME_DIR}/decoders"
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc25.png" "${DSVIEW_RUNTIME_DIR}/showDoc25.png"
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc31.png" "${DSVIEW_RUNTIME_DIR}/showDoc31.png"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/DSView/res" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/res"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/lang" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/lang"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/DSView/demo" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/demo"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/libsigrokdecode4DSL/decoders" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/decoders"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc25.png" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/showDoc25.png"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/DSView/icons/showDoc31.png" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/showDoc31.png"
 		VERBATIM
 	)
 else()
