@@ -108,6 +108,11 @@ static void send_event_end(struct uart_vcd_context *ctx, const struct sr_dev_ins
     if (ctx->end_sent)
         return;
 
+    sr_info("send_event_end: parsed=%llu, sample=%llu, sync_seen=%d, collecting=%d",
+            (unsigned long long)ctx->parsed_events,
+            (unsigned long long)ctx->collected_samples,
+            ctx->sync_seen, ctx->collecting);
+
     if (ctx->parsed_events || ctx->activity_mask) {
         sr_info("final parsed=%llu, sample=%llu, activity=0x%08x, "
                 "bad_packets=%llu, recovered=%llu, dropped_input=%llu",
@@ -620,6 +625,7 @@ static int receive_data_event(int fd, int revents, const struct sr_dev_inst *sdi
             ds_data_forward(sdi,&pkt);
             ctx->end_sent=TRUE;
         }
+        sr_info("receive_data_event: collecting=FALSE, returning FALSE to remove source");
         return FALSE;
     }
     if (!(revents & G_IO_IN)) return TRUE;

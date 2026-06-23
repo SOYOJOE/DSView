@@ -163,8 +163,10 @@ static int sr_session_iteration(gboolean block)
 			 */
 			if (!session->sources[i].cb(session->pollfds[i].fd,
 					session->pollfds[i].revents,
-					session->sources[i].cb_data))
+					session->sources[i].cb_data)) {
+				sr_info("session: source callback returned FALSE, removing source");
 				sr_session_source_remove(session->sources[i].poll_object);
+			}
 		}
 		/*
 		 * We want to take as little time as possible to stop
@@ -174,7 +176,7 @@ static int sr_session_iteration(gboolean block)
 		 */
         g_mutex_lock(&session->stop_mutex);
 		if (session->abort_session) {
-			sr_info("Collection task aborted.");
+			sr_info("session: abort_session detected, calling acquisition_stop");
 			current_device_acquisition_stop();
 			/* But once is enough. */
 			session->abort_session = FALSE;
@@ -221,14 +223,17 @@ SR_PRIV int sr_session_run(void)
 		/* Real sources, use g_poll() main loop. */
         while (session->num_sources){
 			sr_session_iteration(TRUE);
-		}            
+		}
+        sr_info("session: main loop exited, num_sources=%d", session->num_sources);
 	}
 
     g_mutex_lock(&session->stop_mutex);
+    sr_info("session: calling final acquisition_stop cleanup");
     current_device_acquisition_stop();
     session->abort_session = FALSE;
     session->running = FALSE;
     g_mutex_unlock(&session->stop_mutex);
+    sr_info("session: sr_session_run() returning");
 	return SR_OK;
 }
 
@@ -253,8 +258,12 @@ SR_PRIV int sr_session_stop(void)
 	}
 
     g_mutex_lock(&session->stop_mutex);
-    if (session->running)
-        session->abort_session = TRUE;  
+    if (session->running) {
+        sr_info("session: sr_session_stop() setting abort_session=TRUE");
+        session->abort_session = TRUE;
+    } else {
+        sr_info("session: sr_session_stop() but session->running is FALSE");
+    }
     g_mutex_unlock(&session->stop_mutex);
 
 	return SR_OK;
@@ -488,6 +497,7 @@ static int _sr_session_source_remove(gintptr poll_object)
     session->num_sources -= 1;
 
     if (session->num_sources == 0) {
+        sr_info("session: last source removed, num_sources=0");
         session->source_timeout = -1;
         g_free(session->pollfds);
         g_free(session->sources);
