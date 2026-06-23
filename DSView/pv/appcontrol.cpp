@@ -99,12 +99,26 @@ bool AppControl::Init()
     srd_log_set_context(dsv_log_context());
 
 #ifdef _WIN32
-#ifdef PYTHON3_HOME
     {
-        QString pythonHome = QString::fromUtf8(PYTHON3_HOME);
-        dsv_info("PYTHON3_HOME=\"%s\"", pythonHome.toUtf8().constData());
+        QString pythonHome;
         QDir pydir;
-        if (pydir.exists(pythonHome)){
+
+        // Prefer PYTHONHOME env var (set by run.bat for portable deployment),
+        // fall back to compile-time PYTHON3_HOME (dev machine).
+        QByteArray envHome = qgetenv("PYTHONHOME");
+        if (!envHome.isEmpty()) {
+            pythonHome = QString::fromLocal8Bit(envHome);
+            dsv_info("PYTHONHOME from env: \"%s\"", pythonHome.toUtf8().constData());
+        }
+#ifdef PYTHON3_HOME
+        if (pythonHome.isEmpty()) {
+            pythonHome = QString::fromUtf8(PYTHON3_HOME);
+            dsv_info("PYTHON3_HOME from compile-time: \"%s\"", pythonHome.toUtf8().constData());
+        }
+#endif
+        if (pythonHome.isEmpty()) {
+            dsv_err("PYTHONHOME not set and PYTHON3_HOME not defined! Re-run cmake to set it.");
+        } else if (pydir.exists(pythonHome)) {
             const wchar_t *pyhome = reinterpret_cast<const wchar_t*>(pythonHome.utf16());
             srd_set_python_home(pyhome);
             dsv_info("Set PYTHONHOME to \"%s\"", pythonHome.toUtf8().constData());
@@ -117,12 +131,9 @@ bool AppControl::Init()
                 dsv_err("Python bin dir not found: \"%s\"", pythonBin.toUtf8().constData());
             }
         } else {
-            dsv_err("PYTHON3_HOME dir not found: \"%s\"", pythonHome.toUtf8().constData());
+            dsv_err("PYTHONHOME dir not found: \"%s\"", pythonHome.toUtf8().constData());
         }
     }
-#else
-    dsv_err("PYTHON3_HOME is not defined! Re-run cmake to set it.");
-#endif
 #endif
     
     //the python script path of decoder
