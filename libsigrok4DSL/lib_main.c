@@ -805,7 +805,9 @@ static gpointer collect_run_proc(gpointer data)
 
 	send_event(DS_EV_DEVICE_RUNNING);
 
+	sr_info("Collect thread: entering sr_session_run()");
 	ret = sr_session_run();
+	sr_info("Collect thread: sr_session_run() returned, ret=%d", ret);
 
 	send_event(DS_EV_DEVICE_STOPPED);
 
@@ -846,12 +848,15 @@ SR_API int ds_stop_collect()
 	}
 
 	// Stop current session.
+	sr_info("Stop collect: calling sr_session_stop()");
 	sr_session_stop();
 
 	// Wait the collect thread ends.
+	sr_info("Stop collect: waiting for collect thread to join...");
 	if (lib_ctx.collect_thread != NULL)
 		g_thread_join(lib_ctx.collect_thread);
 	lib_ctx.collect_thread = NULL;
+	sr_info("Stop collect: collect thread joined, done.");
 
 	return SR_OK;
 }
@@ -1164,10 +1169,13 @@ SR_PRIV int current_device_acquisition_stop()
 {
 	struct sr_dev_inst *di;
 	di = lib_ctx.actived_device_instance;
+	sr_info("current_device_acquisition_stop: di=%p", di);
 	if (di != NULL && di->driver && di->driver->dev_acquisition_stop)
 	{
+		sr_info("current_device_acquisition_stop: calling dev_acquisition_stop");
 		return di->driver->dev_acquisition_stop(di, (void *)di);
 	}
+	sr_info("current_device_acquisition_stop: no driver stop function, returning SR_ERR");
 	return SR_ERR;
 }
 
