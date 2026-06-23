@@ -1,8 +1,8 @@
 /*
- * gpio_event.h — MCU-side UART_VCD Event Protocol v2 encoder
+ * gpio_event.h — MCU-side UART_VCD Event Protocol v3 encoder
  *
  * 24MHz system clock, raw tick delta, fixed-size header encoding.
- * Compatible with DSView uart-vcd EVENT protocol v2 driver.
+ * Compatible with DSView uart-vcd EVENT protocol v3 driver.
  *
  * TX path uses two 4KB ping-pong DMA buffers for non-blocking transmission.
  *
@@ -28,14 +28,23 @@ extern "C" {
 #endif
 
 /* ─── Configuration ─── */
-enum {
+typedef enum {
+    GPIO_EVENT_LEVEL_DEBUG = 0,
+    GPIO_EVENT_LEVEL_INFO = 1,
+    GPIO_EVENT_LEVEL_WARN = 2,
+    GPIO_EVENT_LEVEL_ERROR = 3,
+} gpio_event_level_t;
+
+typedef enum {
     GPIO_EVENT_RENDER_MODE_HEX = 0,
     GPIO_EVENT_RENDER_MODE_ASCII = 1,
-};
+} gpio_event_render_mode_t;
+
 #define GPIO_EVENT_SYS_CLOCK_HZ    24000000
+#define GPIO_EVENT_GPIO_MAX        27
+#define GPIO_EVENT_RENDER_MAX      3
 #define GPIO_EVENT_MAX_CHANNELS    32
-#define GPIO_EVENT_GPIO_MAX        23
-#define GPIO_EVENT_UART_OFFSET     24
+#define GPIO_EVENT_UART_OFFSET     28
 #define GPIO_EVENT_UART_BAUD       1000000
 #define GPIO_EVENT_UART_NUM        0
 #define GPIO_EVENT_UART_MARKER     0x80
@@ -57,7 +66,7 @@ void gpio_event_toggle(int channel);
 
 /*
  * Interrupt-only fast path. These functions do no channel validation and must
- * only be called with channel 0..23 from an ISR. Use one event-producing
+ * only be called with channel 0..27 from an ISR. Use one event-producing
  * context: while these APIs are active, do not call regular GPIO/string or
  * user_uart_* APIs. The main loop may keep calling uart_tx_poll().
  */
@@ -65,9 +74,11 @@ void gpio_event_irq_high(unsigned int channel);
 void gpio_event_irq_low(unsigned int channel);
 void gpio_event_irq_toggle(unsigned int channel);
 
-void gpio_event_send_string(int channel, int render_mode,
-                            const uint8_t *label, int label_len,
-                            const uint8_t *data,  int data_len);
+void gpio_event_send_sync(void);
+void gpio_event_send_text(gpio_event_level_t level,
+                          gpio_event_render_mode_t render_mode,
+                          const uint8_t *label, int label_len,
+                          const uint8_t *data, int data_len);
 void gpio_event_tx(void);
 
 /* ─── TX ring buffer API ─── */

@@ -10,7 +10,7 @@
     "Max Height": "1X",
     "Operation Mode": 1,
     "Sample count": "2500000000",
-    "Sample rate": "6000000",
+    "Sample rate": "24000000",
     "Stop Options": 1,
     "Threshold Level": "1",
     "Title": "DSView v1.3.2",
@@ -47,20 +47,16 @@
         {"colour":"default","enabled":true,"index":21,"name":"D21","strigger":0,"type":10000,"view_index":21},
         {"colour":"default","enabled":true,"index":22,"name":"D22","strigger":0,"type":10000,"view_index":22},
         {"colour":"default","enabled":true,"index":23,"name":"D23","strigger":0,"type":10000,"view_index":23},
-        {"colour":"default","enabled":true,"index":24,"name":"RX0","strigger":0,"type":10000,"view_index":24},
-        {"colour":"default","enabled":true,"index":25,"name":"RX1","strigger":0,"type":10000,"view_index":26},
-        {"colour":"default","enabled":true,"index":26,"name":"RX2","strigger":0,"type":10000,"view_index":28},
-        {"colour":"default","enabled":true,"index":27,"name":"RX3","strigger":0,"type":10000,"view_index":30},
-        {"colour":"default","enabled":true,"index":28,"name":"RX4","strigger":0,"type":10000,"view_index":32},
-        {"colour":"default","enabled":true,"index":29,"name":"RX5","strigger":0,"type":10000,"view_index":34},
-        {"colour":"default","enabled":true,"index":30,"name":"RX6","strigger":0,"type":10000,"view_index":36},
-        {"colour":"default","enabled":true,"index":31,"name":"RX7","strigger":0,"type":10000,"view_index":38}
+        {"colour":"default","enabled":true,"index":24,"name":"D24","strigger":0,"type":10000,"view_index":24},
+        {"colour":"default","enabled":true,"index":25,"name":"D25","strigger":0,"type":10000,"view_index":25},
+        {"colour":"default","enabled":true,"index":26,"name":"D26","strigger":0,"type":10000,"view_index":26},
+        {"colour":"default","enabled":true,"index":27,"name":"D27","strigger":0,"type":10000,"view_index":27}
     ],
     "decoder": [
         {
-            "channel": [{"rxtx": 24}],
+            "channel": [{"rxtx": 28}],
             "id": "0:uart",
-            "label": "0:UART-RX0",
+            "label": "LOG-DEBUG",
             "options": {
                 "anno_startstop": "no",
                 "baudrate": 6000000,
@@ -82,39 +78,12 @@
             },
             "stacked decoders": [],
             "version": 2,
-            "view_index": 25
+            "view_index": 28
         },
         {
-            "channel": [{"rxtx": 25}],
+            "channel": [{"rxtx": 29}],
             "id": "0:uart",
-            "label": "1:UART-RX1",
-            "options": {
-                "anno_startstop": "no",
-                "baudrate": 6000000,
-                "bit_order": "lsb-first",
-                "format": "ascii",
-                "invert": "no",
-                "num_data_bits": 8,
-                "num_stop_bits": 1,
-                "parity_check": "yes",
-                "parity_type": "none"
-            },
-            "show": {
-                "0:uart": true,
-                "0:uart: bits": true,
-                "0:uart: break": true,
-                "0:uart: RX/TX": true,
-                "0:uart: RX/TX dump": false,
-                "0:uart: warnings": true
-            },
-            "stacked decoders": [],
-            "version": 2,
-            "view_index": 27
-        },
-        {
-            "channel": [{"rxtx": 26}],
-            "id": "0:uart",
-            "label": "2:UART-RX2",
+            "label": "LOG-INFO",
             "options": {
                 "anno_startstop": "no",
                 "baudrate": 6000000,
@@ -139,9 +108,36 @@
             "view_index": 29
         },
         {
-            "channel": [{"rxtx": 27}],
+            "channel": [{"rxtx": 30}],
             "id": "0:uart",
-            "label": "3:UART-RX3",
+            "label": "LOG-WARN",
+            "options": {
+                "anno_startstop": "no",
+                "baudrate": 6000000,
+                "bit_order": "lsb-first",
+                "format": "ascii",
+                "invert": "no",
+                "num_data_bits": 8,
+                "num_stop_bits": 1,
+                "parity_check": "yes",
+                "parity_type": "none"
+            },
+            "show": {
+                "0:uart": true,
+                "0:uart: bits": true,
+                "0:uart: break": true,
+                "0:uart: RX/TX": true,
+                "0:uart: RX/TX dump": false,
+                "0:uart: warnings": true
+            },
+            "stacked decoders": [],
+            "version": 2,
+            "view_index": 30
+        },
+        {
+            "channel": [{"rxtx": 31}],
+            "id": "0:uart",
+            "label": "LOG-ERROR",
             "options": {
                 "anno_startstop": "no",
                 "baudrate": 6000000,
@@ -164,114 +160,6 @@
             "stacked decoders": [],
             "version": 2,
             "view_index": 31
-        },
-        {
-            "channel": [{"rxtx": 28}],
-            "id": "0:uart",
-            "label": "4:UART-RX4",
-            "options": {
-                "anno_startstop": "no",
-                "baudrate": 6000000,
-                "bit_order": "lsb-first",
-                "format": "ascii",
-                "invert": "no",
-                "num_data_bits": 8,
-                "num_stop_bits": 1,
-                "parity_check": "yes",
-                "parity_type": "none"
-            },
-            "show": {
-                "0:uart": true,
-                "0:uart: bits": true,
-                "0:uart: break": true,
-                "0:uart: RX/TX": true,
-                "0:uart: RX/TX dump": false,
-                "0:uart: warnings": true
-            },
-            "stacked decoders": [],
-            "version": 2,
-            "view_index": 33
-        },
-        {
-            "channel": [{"rxtx": 29}],
-            "id": "0:uart",
-            "label": "5:UART-RX5",
-            "options": {
-                "anno_startstop": "no",
-                "baudrate": 6000000,
-                "bit_order": "lsb-first",
-                "format": "ascii",
-                "invert": "no",
-                "num_data_bits": 8,
-                "num_stop_bits": 1,
-                "parity_check": "yes",
-                "parity_type": "none"
-            },
-            "show": {
-                "0:uart": true,
-                "0:uart: bits": true,
-                "0:uart: break": true,
-                "0:uart: RX/TX": true,
-                "0:uart: RX/TX dump": false,
-                "0:uart: warnings": true
-            },
-            "stacked decoders": [],
-            "version": 2,
-            "view_index": 35
-        },
-        {
-            "channel": [{"rxtx": 30}],
-            "id": "0:uart",
-            "label": "6:UART-RX6",
-            "options": {
-                "anno_startstop": "no",
-                "baudrate": 6000000,
-                "bit_order": "lsb-first",
-                "format": "ascii",
-                "invert": "no",
-                "num_data_bits": 8,
-                "num_stop_bits": 1,
-                "parity_check": "yes",
-                "parity_type": "none"
-            },
-            "show": {
-                "0:uart": true,
-                "0:uart: bits": true,
-                "0:uart: break": true,
-                "0:uart: RX/TX": true,
-                "0:uart: RX/TX dump": false,
-                "0:uart: warnings": true
-            },
-            "stacked decoders": [],
-            "version": 2,
-            "view_index": 37
-        },
-        {
-            "channel": [{"rxtx": 31}],
-            "id": "0:uart",
-            "label": "7:UART-RX7",
-            "options": {
-                "anno_startstop": "no",
-                "baudrate": 6000000,
-                "bit_order": "lsb-first",
-                "format": "ascii",
-                "invert": "no",
-                "num_data_bits": 8,
-                "num_stop_bits": 1,
-                "parity_check": "yes",
-                "parity_type": "none"
-            },
-            "show": {
-                "0:uart": true,
-                "0:uart: bits": true,
-                "0:uart: break": true,
-                "0:uart: RX/TX": true,
-                "0:uart: RX/TX dump": false,
-                "0:uart: warnings": true
-            },
-            "stacked decoders": [],
-            "version": 2,
-            "view_index": 39
         }
     ],
     "trigger": {

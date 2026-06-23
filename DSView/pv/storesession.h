@@ -73,6 +73,7 @@ private:
     void export_proc(pv::data::Snapshot *snapshot);
     void export_exec(pv::data::Snapshot *snapshot);
     bool decoders_gen(std::string &str);
+    void save_uart_vcd_text_log(pv::data::Snapshot *snapshot);
  
 
 public:    

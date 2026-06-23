@@ -23,6 +23,7 @@
 #include <libsigrokdecode.h>
 #include "../dsvdef.h" 
 #include <boost/functional/hash.hpp>
+#include <cstring>
 #include <QAction> 
 #include <QFormLayout>
 #include <QLabel>
@@ -111,6 +112,29 @@ const QColor DecodeTrace::OutlineColours[16] = {
 	QColor(0x6B, 0x23, 0x37)
 };
 
+static bool uart_vcd_log_colour(int probe_index, QColor &fill, QColor &outline)
+{
+    static const QColor LogFill[4] = {
+        QColor(0x72, 0x9F, 0xCF), /* DEBUG */
+        QColor(0x8A, 0xE2, 0x34), /* INFO */
+        QColor(0xFC, 0xE9, 0x4F), /* WARN */
+        QColor(0xEF, 0x29, 0x29), /* ERROR */
+    };
+    static const QColor LogOutline[4] = {
+        QColor(0x39, 0x4F, 0x67),
+        QColor(0x45, 0x71, 0x1A),
+        QColor(0x7E, 0x74, 0x27),
+        QColor(0x77, 0x14, 0x14),
+    };
+    const int level = probe_index - 28;
+    if (level < 0 || level >= 4)
+        return false;
+
+    fill = LogFill[level];
+    outline = LogOutline[level];
+    return true;
+}
+
 
 DecodeTrace::DecodeTrace(pv::SigSession *session,
 	pv::data::DecoderStack *decoder_stack, int index) :
@@ -119,6 +143,12 @@ DecodeTrace::DecodeTrace(pv::SigSession *session,
     assert(decoder_stack);
 
     _colour = DecodeColours[index % countof(DecodeColours)];
+    if (!decoder_stack->stack().empty()) {
+        QColor fill, outline;
+        pv::data::decode::Decoder *dec = decoder_stack->stack().front();
+        if (dec != NULL && uart_vcd_log_colour(dec->first_probe_index(), fill, outline))
+            _colour = fill;
+    }
  
     _decode_start = 0;
     _decode_end  = INT64_MAX; 
@@ -242,10 +272,21 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
     uint64_t end_sample = (uint64_t)max((right + pixels_offset) *
         samples_per_pixel, 0.0);
 
-    for(auto dec : _decoder_stack->stack()) {
-        start_sample = max(dec->decode_start(), start_sample);
-        end_sample = min(dec->decode_end(), end_sample);
-        break;
+    const char *root_decoder_id = NULL;
+    if (!_decoder_stack->stack().empty() &&
+        _decoder_stack->stack().front()->decoder())
+        root_decoder_id = _decoder_stack->stack().front()->decoder()->id;
+    const bool direct_text_stack = root_decoder_id &&
+        strcmp(root_decoder_id, "0:uart") == 0;
+    const uint64_t direct_text_sample_offset =
+        direct_text_stack && _session ? _session->logic_loop_offset() : 0;
+
+    if (!direct_text_stack) {
+        for(auto dec : _decoder_stack->stack()) {
+            start_sample = max(dec->decode_start(), start_sample);
+            end_sample = min(dec->decode_end(), end_sample);
+            break;
+        }
     }
 
     if (end_sample < start_sample)
@@ -276,13 +317,25 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
                         const uint64_t max_annotation =
                                 _decoder_stack->get_max_annotation(row);
                         const double max_annWidth = max_annotation / samples_per_pixel;
+                        const bool direct_text_row = row.decoder() &&
+                            row.decoder()->id &&
+                            strcmp(row.decoder()->id, "0:uart") == 0;
+                        const bool direct_text_detail =
+                            direct_text_row && samples_per_pixel <= 500.0;
                         
-                        if ((max_annWidth > 100) ||
+                        if (direct_text_detail ||
+                            (max_annWidth > 100) ||
                             (max_annWidth > 10 && (min_annWidth > 1 || samples_per_pixel < 50)) ||
                             (max_annWidth == 0 && samples_per_pixel < 10)) {
                             std::vector<Annotation*> annotations;
+                            const uint64_t query_start =
+                                direct_text_row ? start_sample + direct_text_sample_offset :
+                                    start_sample;
+                            const uint64_t query_end =
+                                direct_text_row ? end_sample + direct_text_sample_offset :
+                                    end_sample;
                             _decoder_stack->get_annotation_subset(annotations, row,
-                                start_sample, end_sample);
+                                query_start, query_end);
 
                             if (!annotations.empty()) {
                                 double last_x = -1;
@@ -291,7 +344,8 @@ void DecodeTrace::paint_mid(QPainter &p, int left, int right, QColor fore, QColo
                                     draw_annotation(*a, p, get_text_colour(),
                                         annotation_height, left, right,
                                         samples_per_pixel, pixels_offset, y,
-                                        0, min_annWidth, fore, back, last_x);
+                                        0, min_annWidth, fore, back, last_x,
+                                        direct_text_row ? direct_text_sample_offset : 0);
                                 }
                             }
                         }
@@ -326,26 +380,56 @@ void DecodeTrace::paint_fore(QPainter &p, int left, int right, QColor fore, QCol
 void DecodeTrace::draw_annotation(const pv::data::decode::Annotation &a,
     QPainter &p, QColor text_color, int h, int left, int right,
     double samples_per_pixel, double pixels_offset, int y,
-    size_t base_colour, double min_annWidth, QColor fore, QColor back, double &last_x)
+    size_t base_colour, double min_annWidth, QColor fore, QColor back,
+    double &last_x, uint64_t sample_offset)
 {
-    const double start = max(a.start_sample() / samples_per_pixel -
+    const bool direct_text = a.type() >= 1008 && a.type() <= 1011;
+    uint64_t display_start_sample = a.start_sample();
+    uint64_t display_end_sample = a.end_sample();
+    if (direct_text && sample_offset > 0) {
+        if (display_end_sample <= sample_offset)
+            return;
+        display_start_sample = display_start_sample > sample_offset ?
+            display_start_sample - sample_offset : 0;
+        display_end_sample -= sample_offset;
+    }
+
+    const double start = max(display_start_sample / samples_per_pixel -
         pixels_offset, (double)left);
-    const double end = min(a.end_sample() / samples_per_pixel -
+    double end = min(display_end_sample / samples_per_pixel -
         pixels_offset, (double)right);
 
     const size_t colour = ((base_colour + a.type()) % MaxAnnType) % countof(Colours);
-	const QColor &fill = Colours[colour];
-	const QColor &outline = OutlineColours[colour];
+    QColor fill = Colours[colour];
+    QColor outline = OutlineColours[colour];
+
+    if (direct_text) {
+        const int level = a.type() - 1008;
+        uart_vcd_log_colour(28 + level, fill, outline);
+    }
 
 	if (start > right + DrawPadding || end < left - DrawPadding){
 		return;
     }
 
-    if (end - last_x <= 0.5 && end - start < 1){
-        return;
+    if (direct_text) {
+        const QString text = a.annotations().empty() ?
+            QString() : a.annotations().back();
+        const double min_width = min(max((double)p.boundingRect(QRectF(), 0, text).width() + h,
+                                         48.0),
+                                     180.0);
+        if (end - start < min_width)
+            end = min(start + min_width, (double)right);
+        if (start < last_x + 4)
+            return;
+        last_x = end;
+    } else {
+        if (end - last_x <= 0.5 && end - start < 1){
+            return;
+        }
+
+        last_x = end;
     }
-    
-    last_x = end;
 
     if (_decoder_stack->get_mark_index() == (int64_t)(a.start_sample()+ a.end_sample())/2) {
         p.setPen(View::Blue);

@@ -397,6 +397,10 @@ public:
         return _view_data == _capture_data;
     }
 
+    inline uint64_t logic_loop_offset(){
+        return _view_data ? _view_data->get_logic()->get_loop_offset() : 0;
+    }
+
     inline void update_view(){
         _callback->data_updated();
     }
@@ -476,7 +480,6 @@ private:
     void add_decode_task(view::DecodeTrace *trace);
     void remove_decode_task(view::DecodeTrace *trace);
     void clear_all_decode_task(int &runningDex);
-
     inline void clear_all_decode_task2(){
         int run_dex = 0;
         clear_all_decode_task(run_dex);
@@ -488,7 +491,7 @@ private:
     void capture_init(); 
     void nodata_timeout();
     void feed_timeout();    
-    void clear_decode_result();
+    void clear_decode_result(bool preserve_uart_vcd_text = false);
     void attach_data_to_signal(SessionData *data);
 
     bool action_start_capture(bool instant);
@@ -519,6 +522,7 @@ private:
 	void feed_in_meta(const sr_dev_inst *sdi, const sr_datafeed_meta &meta);
     void feed_in_trigger(const ds_trigger_pos &trigger_pos);
 	void feed_in_logic(const sr_datafeed_logic &o);
+    void feed_in_uart_vcd_text(const sr_datafeed_uart_vcd_text &o);
 
     void feed_in_dso(const sr_datafeed_dso &o);
 	void feed_in_analog(const sr_datafeed_analog &o);    

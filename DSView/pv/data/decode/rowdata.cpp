@@ -22,6 +22,7 @@
 
 #include <math.h>
 #include <assert.h>
+#include <algorithm>
 
 #include "rowdata.h"
 
@@ -85,8 +86,17 @@ void RowData::get_annotation_subset(std::vector<pv::data::decode::Annotation*> &
 {  
     std::lock_guard<std::mutex> lock(_visitor_mutex);
 
-    for (Annotation *p : _annotations)
+    auto it = std::lower_bound(_annotations.begin(), _annotations.end(),
+        start_sample,
+        [](const Annotation *annotation, uint64_t sample) {
+            return annotation->end_sample() <= sample;
+        });
+
+    for (; it != _annotations.end(); ++it)
     {
+        Annotation *p = *it;
+        if (p->start_sample() > end_sample)
+            break;
         if (p->end_sample() > start_sample && p->start_sample() <= end_sample)
         {
             dest.push_back(p);

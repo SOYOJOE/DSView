@@ -16,15 +16,15 @@
 
 #define UART_VCD_DEFAULT_TCP_PORT    12345
 #define UART_VCD_DEFAULT_TCP_HOST    "192.168.100.135"
-#define UART_VCD_NUM_PROBES          32
+#define UART_VCD_NUM_PROBES          28
+#define UART_VCD_GPIO_PROBES         28
+#define UART_VCD_TEXT_CHANNELS       4
+#define UART_VCD_GPIO_MASK           0x0fffffffu
+#define UART_VCD_NON_GPIO_MASK       0xf0000000u
 #define UART_VCD_BUFSIZE             (1024 * 1024)
 #define UART_VCD_EVENT_SAMPLERATE_DEFAULT  24000000
 #define UART_VCD_EVENT_DEFAULT_TOTAL_SAMPLES  SR_Mn(10)
-#define UART_VCD_MAX_HW_DEPTH             SR_Mn(2500)
-#define UART_VCD_UART_BAUD_RATE      (UART_VCD_EVENT_SAMPLERATE_DEFAULT/4)
-#define UART_VCD_PROTOCOL_RAW        0
-#define UART_VCD_PROTOCOL_EVENT      1
-#define UART_VCD_DEFAULT_PROTOCOL    UART_VCD_PROTOCOL_EVENT
+#define UART_VCD_MAX_HW_DEPTH             SR_Mn(25000)
 #define UART_VCD_EVENT_BATCH_SIZE    4096
 
 struct uart_vcd_context {
@@ -44,7 +44,6 @@ struct uart_vcd_context {
     uint64_t   input_offset;
     struct sr_logic_sparse_event *event_buf;
     uint32_t   event_count;
-    int        protocol;
     uint32_t   gpio_state;
     uint32_t   output_state;
     uint32_t   recorded_state;
@@ -54,16 +53,7 @@ struct uart_vcd_context {
     uint64_t   bad_packets;
     uint64_t   recovered_packets;
     uint64_t   dropped_input_bytes;
-    uint64_t   dropped_uart_bytes;
-    uint8_t    uart_tx_data[8];
-    int8_t     uart_tx_bit[8];
-    int8_t     uart_tx_samp_per_bit;
-    uint64_t   uart_tx_next_sample[8];
-    uint8_t    uart_fifo[8][64];
-    uint8_t    uart_fifo_head[8];
-    uint8_t    uart_fifo_tail[8];
-    int        uart_tx_active;
-    gboolean   uart_fifo_overflow;
+    gboolean   sync_seen;
 };
 
 static const uint64_t uart_vcd_samplerates[] = { 24000000 };
@@ -72,7 +62,7 @@ static const char *uart_vcd_probe_names[] = {
     "D0",  "D1",  "D2",  "D3",  "D4",  "D5",  "D6",  "D7",
     "D8",  "D9",  "D10", "D11", "D12", "D13", "D14", "D15",
     "D16", "D17", "D18", "D19", "D20", "D21", "D22", "D23",
-    "RX0", "RX1", "RX2", "RX3", "RX4", "RX5", "RX6", "RX7",
+    "D24", "D25", "D26", "D27",
     NULL,
 };
 

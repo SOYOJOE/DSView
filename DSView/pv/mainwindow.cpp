@@ -22,6 +22,7 @@
 
 #include <QAction>
 #include <QButtonGroup>
+#include <QFile>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QMenu>
@@ -42,6 +43,7 @@
 #include <QTextStream>
 #include <QJsonValue>
 #include <QJsonArray>
+#include <algorithm>
 #include <functional>
 
 //include with qt5
@@ -79,6 +81,8 @@
 #include "view/dsosignal.h"
 #include "view/logicsignal.h"
 #include "view/analogsignal.h"
+#include "view/decodetrace.h"
+#include "data/decoderstack.h"
 
 /* __STDC_FORMAT_MACROS is required for PRIu64 and friends (in C++). */
 #include <inttypes.h>
@@ -109,6 +113,23 @@ namespace pv
 
     namespace{
         QString tmp_file;
+
+        QString uart_vcd_text_log_file_name(const QString &dsl_file)
+        {
+            return dsl_file + ".txt";
+        }
+
+        uint64_t json_to_u64(const QJsonValue &value, uint64_t fallback = 0)
+        {
+            if (value.isString())
+                return value.toString().toULongLong();
+            if (value.isDouble()) {
+                const double v = value.toDouble();
+                if (v >= 0)
+                    return (uint64_t)v;
+            }
+            return fallback;
+        }
     }
 
     MainWindow::MainWindow(toolbars::TitleBar *title_bar, QWidget *parent)
@@ -1776,6 +1797,86 @@ namespace pv
         return dec_array;
     }
 
+    void MainWindow::load_uart_vcd_text_log(QString dsl_file)
+    {
+        const int UartVcdTextProbeOffset = 28;
+        const int UartVcdTextChannels = 4;
+        const int UartVcdTextTypeBase = 1008;
+        const QString log_file = uart_vcd_text_log_file_name(dsl_file);
+
+        QFile f(log_file);
+        if (!f.exists())
+            return;
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            dsv_warn("Warning: Couldn't open uart-vcd log sidecar: %s",
+                     log_file.toUtf8().data());
+            return;
+        }
+
+        QTextStream in(&f);
+        encoding::set_utf8(in);
+        uint64_t loaded = 0;
+        uint64_t line_no = 0;
+
+        while (!in.atEnd()) {
+            line_no++;
+            const QString line = in.readLine().trimmed();
+            if (line.isEmpty())
+                continue;
+
+            QJsonParseError error;
+            const QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8(), &error);
+            if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+                dsv_warn("Warning: Bad uart-vcd log line %llu in %s",
+                         (unsigned long long)line_no, log_file.toUtf8().data());
+                continue;
+            }
+
+            const QJsonObject obj = doc.object();
+            const int level = obj["level"].toInt(-1);
+            if (level < 0 || level >= UartVcdTextChannels)
+                continue;
+
+            const QString text = obj["text"].toString();
+            if (text.isEmpty())
+                continue;
+
+            const uint64_t start = json_to_u64(obj["sample"]);
+            uint64_t end = json_to_u64(obj["end_sample"], start + 1);
+            if (end <= start)
+                end = start + 1;
+
+            const int target_probe = UartVcdTextProbeOffset + level;
+            const int type = UartVcdTextTypeBase + level;
+            bool pushed = false;
+
+            for (auto trace : _session->get_decode_signals()) {
+                if (trace == NULL || trace->decoder() == NULL)
+                    continue;
+
+                std::list<int> indexes = trace->get_index_list();
+                if (std::find(indexes.begin(), indexes.end(), target_probe) ==
+                    indexes.end())
+                    continue;
+
+                if (trace->decoder()->push_direct_annotation(start, end, 0,
+                                                             type, {text})) {
+                    loaded++;
+                    pushed = true;
+                }
+                break;
+            }
+
+            if (!pushed) {
+                dsv_warn("Warning: No uart-vcd log trace for level %d", level);
+            }
+        }
+
+        f.close();
+        dsv_info("uart-vcd log sidecar loaded: %s, count=%llu",
+                 log_file.toUtf8().data(), (unsigned long long)loaded);
+    }
+
     void MainWindow::update_toolbar_view_status()
     {
         _sampling_bar->update_view_status();
@@ -1813,6 +1914,8 @@ namespace pv
             case DSV_MSG_COLLECT_END:
             {
                 prgRate(0);
+                if (_device_agent->is_file())
+                    load_uart_vcd_text_log(_device_agent->path());
                 _view->repeat_unshow();
                 _view->on_state_changed(true);                 
                 break;

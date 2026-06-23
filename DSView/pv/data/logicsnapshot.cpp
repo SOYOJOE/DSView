@@ -326,13 +326,17 @@ bool LogicSnapshot::sparse_sample(uint64_t index, int order) const
     return it == edges.begin() ? false : (it - 1)->level;
 }
 
-bool LogicSnapshot::sparse_next_edge(uint64_t &index, uint64_t end,
-                                     int order) const
+bool LogicSnapshot::sparse_next_edge(uint64_t &index, bool last_sample,
+                                     uint64_t end, int order) const
 {
     const std::vector<SparseEdge> &edges = _sparse_edges[order];
-    const auto it = lower_bound(edges.begin(), edges.end(), index,
-        [](const SparseEdge &edge, uint64_t sample) {
-            return edge.sample < sample;
+
+    if (sparse_sample(index, order) != last_sample)
+        return true;
+
+    const auto it = upper_bound(edges.begin(), edges.end(), index,
+        [](uint64_t sample, const SparseEdge &edge) {
+            return sample < edge.sample;
         });
     if (it == edges.end() || it->sample > end)
         return false;
@@ -340,9 +344,16 @@ bool LogicSnapshot::sparse_next_edge(uint64_t &index, uint64_t end,
     return true;
 }
 
-bool LogicSnapshot::sparse_prev_edge(uint64_t &index, int order) const
+bool LogicSnapshot::sparse_prev_edge(uint64_t &index, bool last_sample,
+                                     int order) const
 {
     const std::vector<SparseEdge> &edges = _sparse_edges[order];
+
+    if (sparse_sample(index, order) != last_sample) {
+        index++;
+        return true;
+    }
+
     auto it = upper_bound(edges.begin(), edges.end(), index,
         [](uint64_t sample, const SparseEdge &edge) {
             return sample < edge.sample;
@@ -1016,9 +1027,8 @@ bool LogicSnapshot::get_nxt_edge_self(uint64_t &index, bool last_sample, uint64_
         return false;
 
     if (_sparse_mode) {
-        (void)last_sample;
         (void)min_length;
-        return sparse_next_edge(index, end, order);
+        return sparse_next_edge(index, last_sample, end, order);
     }
 
     //const unsigned int min_level = max((int)floorf(logf(min_length) / logf(Scale)) - 1, 0);
@@ -1116,9 +1126,8 @@ bool LogicSnapshot::get_pre_edge_self(uint64_t &index, bool last_sample,
         return false;
 
     if (_sparse_mode) {
-        (void)last_sample;
         (void)min_length;
-        return sparse_prev_edge(index, order);
+        return sparse_prev_edge(index, last_sample, order);
     }
 
     //const unsigned int min_level = max((int)floorf(logf(min_length) / logf(Scale)) - 1, 1);
@@ -1624,6 +1633,9 @@ QString LogicSnapshot::enabled_channel_text() const
 
 int LogicSnapshot::get_block_num()
 {
+   if (_sparse_mode)
+       return ceil(_ring_sample_count * 1.0 / LeafBlockSamples);
+
    int block = ceil((_ring_sample_count+_loop_offset) * 1.0 / LeafBlockSamples) 
             - floor(_loop_offset * 1.0 / LeafBlockSamples);
    return block;
@@ -1636,6 +1648,16 @@ uint64_t LogicSnapshot::get_block_size(int block_index)
 
     assert(block_index < block_num);
 
+    auto bytes_for_samples = [](uint64_t sample_count) -> uint64_t {
+        return (sample_count + 7) / 8;
+    };
+
+    if (_sparse_mode) {
+        const uint64_t start = (uint64_t)block_index * LeafBlockSamples;
+        const uint64_t end = min(start + LeafBlockSamples, _ring_sample_count);
+        return bytes_for_samples(end - start);
+    }
+
     if (_loop_offset > 0)
     {
         if (block_index > 0 && block_index < block_num - 1) {
@@ -1644,12 +1666,12 @@ uint64_t LogicSnapshot::get_block_size(int block_index)
         else if (block_index == 0){
             samples = min(_ring_sample_count + (_loop_offset % (uint64_t)LeafBlockSamples),
                         (uint64_t)LeafBlockSamples) - (_loop_offset % (uint64_t)LeafBlockSamples);
-            return samples/8;
+            return bytes_for_samples(samples);
         }
         else{
             samples = (_ring_sample_count + _loop_offset) - (_ring_sample_count + _loop_offset - 1)
                     / LeafBlockSamples * LeafBlockSamples;
-            return samples/8;
+            return bytes_for_samples(samples);
         }
     }
     else{
@@ -1660,7 +1682,7 @@ uint64_t LogicSnapshot::get_block_size(int block_index)
             if (_ring_sample_count % LeafBlockSamples == 0)
                 return LeafBlockSamples / 8;
             else
-                return (_ring_sample_count % LeafBlockSamples) / 8;
+                return bytes_for_samples(_ring_sample_count % LeafBlockSamples);
         }
     }    
 }
@@ -1676,16 +1698,9 @@ uint8_t *LogicSnapshot::get_block_buf(int block_index, int sig_index, bool &samp
     }
 
     if (_sparse_mode) {
-        const uint64_t absolute_block =
-            block_index + _loop_offset / LeafBlockSamples;
-        uint64_t start = absolute_block * LeafBlockSamples;
+        uint64_t start = _loop_offset + (uint64_t)block_index * LeafBlockSamples;
         const uint64_t absolute_end = _loop_offset + _ring_sample_count;
-
-        if (block_index == 0)
-            start = max(start, _loop_offset);
-
-        const uint64_t end =
-            min((absolute_block + 1) * LeafBlockSamples, absolute_end);
+        const uint64_t end = min(start + LeafBlockSamples, absolute_end);
         sample = sparse_sample(start, order);
         materialize_sparse(start, end, order, _sparse_block_cache[order]);
         return _sparse_block_cache[order].data();

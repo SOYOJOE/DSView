@@ -55,19 +55,31 @@ void user_init(void)
 void main_loop(void)
 {
     unsigned long t = stimer_get_tick();
+    static unsigned long sync_tick = 0;
+    static int sync_inited = 0;
+
+    if (!sync_inited || clock_time_exceed(sync_tick, 200000)) {
+        gpio_event_send_sync();
+        sync_tick = t;
+        sync_inited = 1;
+    }
 
     gpio_set_high_level(LED1);
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < 28; i++) {
         gpio_event_toggle(i);
     }
     gpio_set_low_level(LED1);
 
     gpio_set_high_level(LED2);
-    static uint8_t data[] = {0, 'a', 'l', 'u', 'e'};
-    for (int i = 0; i < 8; i++) {
-        int mode = (i < 4) ? GPIO_EVENT_RENDER_MODE_HEX : GPIO_EVENT_RENDER_MODE_ASCII;
-        gpio_event_send_string(i, mode, (uint8_t *)"lable:", 6, data, 5);
-    }
+    static uint8_t data[] = {0, 'a'};
+    gpio_event_send_text(GPIO_EVENT_LEVEL_DEBUG, GPIO_EVENT_RENDER_MODE_HEX,
+                         (const uint8_t *)"D:", 2, data, 2);
+    gpio_event_send_text(GPIO_EVENT_LEVEL_INFO, GPIO_EVENT_RENDER_MODE_HEX,
+                         0, 0, data, 2);
+    gpio_event_send_text(GPIO_EVENT_LEVEL_WARN, GPIO_EVENT_RENDER_MODE_ASCII,
+                         (const uint8_t *)"W:", 2, data, 2);
+    gpio_event_send_text(GPIO_EVENT_LEVEL_ERROR, GPIO_EVENT_RENDER_MODE_ASCII,
+                         (const uint8_t *)"E:", 2, 0, 0);
     data[0]++;
     gpio_set_low_level(LED2);
 

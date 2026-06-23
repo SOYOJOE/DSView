@@ -99,6 +99,11 @@ int Decoder::first_probe_index()
 		return (*it).second;
 	}
 
+    it = _probes_back.begin();
+    if (it != _probes_back.end()){
+        return (*it).second;
+    }
+
 	return -1;
 }
 

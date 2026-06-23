@@ -129,6 +129,8 @@ public:
 
     bool list_annotation(decode::Annotation *ann,
                         uint16_t row_index, uint64_t col_index);
+    void list_direct_annotations(std::vector<decode::Annotation> &dest,
+                                 int type_min, int type_max);
 
 
     bool list_row_title(int row, QString &title);
@@ -187,10 +189,13 @@ public:
         return _result_count;
     }
 
+    bool push_direct_annotation(uint64_t start_sample, uint64_t end_sample,
+                                int format, int type,
+                                const std::vector<QString> &annotations);
+
 private:
     void decode_data(const uint64_t decode_start, const uint64_t decode_end, srd_session *const session);
 	void execute_decode_stack();
-    bool execute_native_uart_decode();
     bool push_native_annotation(uint64_t start_sample, uint64_t end_sample,
                                 int format, int type,
                                 const std::vector<QString> &annotations);

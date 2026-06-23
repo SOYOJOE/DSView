@@ -192,8 +192,9 @@ private:
     void append_sparse_payload(const sr_datafeed_logic &logic);
     void init_sparse(uint64_t total_sample_count, GSList *channels);
     bool sparse_sample(uint64_t index, int order) const;
-    bool sparse_next_edge(uint64_t &index, uint64_t end, int order) const;
-    bool sparse_prev_edge(uint64_t &index, int order) const;
+    bool sparse_next_edge(uint64_t &index, bool last_sample, uint64_t end,
+                          int order) const;
+    bool sparse_prev_edge(uint64_t &index, bool last_sample, int order) const;
     void sparse_prune(uint64_t start);
     void materialize_sparse(uint64_t start, uint64_t end, int order,
                             std::vector<uint8_t> &buffer) const;
