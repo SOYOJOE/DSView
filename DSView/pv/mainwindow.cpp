@@ -745,8 +745,10 @@ namespace pv
                     sessionVar[info->name] = QJsonValue::fromVariant(QString::number(g_variant_get_uint64(gvar)));
                 else if (info->datatype == SR_T_UINT8)
                     sessionVar[info->name] = QJsonValue::fromVariant(g_variant_get_byte(gvar));
-                 else if (info->datatype == SR_T_INT16)
+                else if (info->datatype == SR_T_INT16)
                     sessionVar[info->name] = QJsonValue::fromVariant(g_variant_get_int16(gvar));
+                else if (info->datatype == SR_T_INT32)
+                    sessionVar[info->name] = QJsonValue::fromVariant(g_variant_get_int32(gvar));
                 else if (info->datatype == SR_T_FLOAT) //save as string format
                     sessionVar[info->name] = QJsonValue::fromVariant(QString::number(g_variant_get_double(gvar)));
                 else if (info->datatype == SR_T_CHAR)
@@ -904,6 +906,9 @@ namespace pv
                 }
                 else if (info->datatype == SR_T_INT16){
                     gvar = g_variant_new_int16(sessionObj[info->name].toInt());
+                }
+                else if (info->datatype == SR_T_INT32){
+                    gvar = g_variant_new_int32(sessionObj[info->name].toInt());
                 }
                 else if (info->datatype == SR_T_FLOAT){
                     if (sessionObj[info->name].toString() != "")

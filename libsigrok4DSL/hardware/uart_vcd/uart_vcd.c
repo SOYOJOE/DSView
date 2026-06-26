@@ -528,6 +528,7 @@ static int config_get(int id, GVariant **data, const struct sr_dev_inst *sdi,
     case SR_CONF_OPERATION_MODE: *data=g_variant_new_int16(LO_OP_STREAM); break;
     case SR_CONF_LOOP_MODE: *data=g_variant_new_boolean(ctx->is_loop); break;
     case SR_CONF_TCP_HOST: *data=g_variant_new_string(ctx->tcp_host); break;
+    case SR_CONF_TCP_PORT: *data=g_variant_new_int32(ctx->tcp_port); break;
     case SR_CONF_USB_SPEED: *data=g_variant_new_int32(LIBUSB_SPEED_HIGH); break;
     case SR_CONF_USB30_SUPPORT: *data=g_variant_new_boolean(FALSE); break;
     default: return SR_ERR_NA;
@@ -547,6 +548,11 @@ static int config_set(int id, GVariant *data, struct sr_dev_inst *sdi,
     case SR_CONF_LOOP_MODE: ctx->is_loop=g_variant_get_boolean(data); break;
     case SR_CONF_TCP_HOST:
         g_strlcpy(ctx->tcp_host, g_variant_get_string(data, NULL), sizeof(ctx->tcp_host));
+        break;
+    case SR_CONF_TCP_PORT:
+        ctx->tcp_port = g_variant_get_int32(data);
+        if (ctx->tcp_port < 1 || ctx->tcp_port > 65535)
+            ctx->tcp_port = UART_VCD_DEFAULT_TCP_PORT;
         break;
     default: break;
     }

@@ -56,7 +56,11 @@ struct uart_vcd_context {
     gboolean   sync_seen;
 };
 
-static const uint64_t uart_vcd_samplerates[] = { 24000000 };
+static const uint64_t uart_vcd_samplerates[] = {
+    8000000,
+    16000000,
+    24000000,
+};
 
 static const char *uart_vcd_probe_names[] = {
     "D0",  "D1",  "D2",  "D3",  "D4",  "D5",  "D6",  "D7",
@@ -66,7 +70,16 @@ static const char *uart_vcd_probe_names[] = {
     NULL,
 };
 
-static const int32_t uart_vcd_hwoptions[] = { SR_CONF_LOOP_MODE, SR_CONF_TCP_HOST };
-static const int32_t uart_vcd_sessions[]  = { SR_CONF_SAMPLERATE, SR_CONF_LIMIT_SAMPLES, SR_CONF_TCP_HOST };
+static const int32_t uart_vcd_hwoptions[] = {
+    SR_CONF_LOOP_MODE,
+    SR_CONF_TCP_HOST,
+    SR_CONF_TCP_PORT,
+};
+static const int32_t uart_vcd_sessions[]  = {
+    SR_CONF_SAMPLERATE,
+    SR_CONF_LIMIT_SAMPLES,
+    SR_CONF_TCP_HOST,
+    SR_CONF_TCP_PORT,
+};
 
 #endif

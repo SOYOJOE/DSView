@@ -1,7 +1,7 @@
 /*
  * gpio_event.h — MCU-side UART_VCD Event Protocol v3 encoder
  *
- * 24MHz system clock, raw tick delta, fixed-size header encoding.
+ * MCU systimer clock, raw tick delta, fixed-size header encoding.
  * Compatible with DSView uart-vcd EVENT protocol v3 driver.
  *
  * TX path uses two 4KB ping-pong DMA buffers for non-blocking transmission.

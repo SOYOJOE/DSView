@@ -83,6 +83,7 @@ static struct sr_config_info sr_config_info_data[] = {
     {SR_CONF_PROBE_MAP_MIN, SR_T_FLOAT,"Map Min"},
     {SR_CONF_PROBE_MAP_MAX, SR_T_FLOAT,"Map Max"},
     {SR_CONF_TCP_HOST, SR_T_CHAR, "TCP host"},
+    {SR_CONF_TCP_PORT, SR_T_INT32, "TCP port"},
     {0, 0, NULL},
 };
 

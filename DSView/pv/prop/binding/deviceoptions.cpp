@@ -135,6 +135,10 @@ DeviceOptions::DeviceOptions()
             bind_string(name, label, key);
             break;
 
+        case SR_CONF_TCP_PORT:
+            bind_int(name, label, key, "", pair<int64_t, int64_t>(1, 65535));
+            break;
+
         default:
             gvar_list = NULL;
 		}
@@ -377,4 +381,3 @@ void DeviceOptions::bind_list(const QString &name, const QString label, int key,
 } // binding
 } // prop
 } // pv
-

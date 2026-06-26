@@ -3,7 +3,7 @@
  *
  * Wire protocol:  [uint24_le delta_ticks][1B header][payload...]
  * TX path:        ping-pong DMA ring buffer (4KB × 2)
- * Clock:          24MHz systimer ticks
+ * Clock:          GPIO_EVENT_SYS_CLOCK_HZ systimer ticks
  *
  * All hot-path functions are static inline for zero call overhead.
  * Public API functions are non-static, declared in gpio_event.h.

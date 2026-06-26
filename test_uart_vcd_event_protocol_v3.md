@@ -21,8 +21,10 @@ wire size while the PC can still recover to a known boundary after corruption.
 [uint24_le delta_ticks:3][header:1][payload...]
 ```
 
-`delta_ticks` is the elapsed 24 MHz MCU systimer tick count since the previous
-event that advances sample time. The PC maps one tick to one sample.
+`delta_ticks` is the elapsed MCU systimer tick count since the previous event
+that advances sample time. The PC maps one tick to one sample, so the UART_VCD
+sample rate setting must match the MCU systimer frequency, for example 24 MHz,
+16 MHz, or 8 MHz.
 
 ## 2. Header Map
 
@@ -149,7 +151,7 @@ whose first probe index is `28 + level`. If no matching stack exists, it
 prints a diagnostic and drops the annotation. It must not inject text into an
 unrelated decoder stack.
 
-Live UART_VCD log annotations are stored with absolute 24 MHz sample ticks.
+Live UART_VCD log annotations are stored with absolute MCU systimer ticks.
 In loop mode, `LogicSnapshot` displays the visible window as sample
 `0..ring_sample_count` while internally reading sparse edges at
 `visible_sample + loop_offset`. Direct log rendering must use the same mapping:

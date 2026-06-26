@@ -186,7 +186,8 @@ enum {
 	SR_T_RATIONAL_VOLT,
 	SR_T_KEYVALUE,
 	SR_T_LIST,
-	SR_T_INT16
+	SR_T_INT16,
+    SR_T_INT32
 };
 
 /** Value for sr_datafeed_packet.type. */
@@ -1064,6 +1065,9 @@ enum sr_config_option_id
 
     /** TCP host address for network-connected devices */
     SR_CONF_TCP_HOST = 30108,
+
+    /** TCP port for network-connected devices */
+    SR_CONF_TCP_PORT = 30109,
 
 	/*--- Acquisition modes ---------------------------------------------*/
 
